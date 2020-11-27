@@ -17,12 +17,16 @@ DBLIST = [
     {'label': 'capella_internal', 'value': 'capella_internal'},
     {'label': 'choice_internal', 'value': 'choice_internal'},
     {'label': 'colgate_internal', 'value': 'colgate_internal'},
+    {'label': 'frontier_internal', 'value': 'frontier_internal'},
+    {'label': 'legal_zoom_internal', 'value': 'legal_zoom_internal'},
     {'label': 'mcdaus_internal', 'value': 'mcdaus_internal'},
     {'label': 'od_internal', 'value': 'od_internal'},
     {'label': 'hd_internal', 'value': 'hd_internal'},
     {'label': 'stjude_internal', 'value': 'stjude_internal'},
     {'label': 'retail_demo_internal', 'value': 'retail_demo_internal'},
-    {'label': 'sandbox_internal', 'value': 'sandbox_internal'}
+    {'label': 'sandbox_internal', 'value': 'sandbox_internal'},
+    {'label': 'test','value':'science_sandbox'}
+
 ]
 
 
