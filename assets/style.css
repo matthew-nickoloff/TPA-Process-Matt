@@ -1,0 +1,123 @@
+.sideBarCard {
+    height: 820px;
+    overflow-y: scroll;
+}
+
+.mainBarCard {
+    height: 820px;
+    /* overflow-y: scroll; */
+    width: 100%
+}
+
+.chart-div {
+    height: 300px;
+    /* overflow-y: scroll; */
+    /* border-right: 0.3em solid #ecf0f1; */
+    /* background-color: #f8f9fa; */
+}
+
+.tab1_chart{
+    height: 300px;
+}
+
+.card-header-model-inputs {
+	padding: 0.75rem 1.25rem;
+	margin-bottom: 0;
+	background-color: rgba(0, 0, 0, 0.03);
+	border-bottom: 1px solid rgba(0, 0, 0, 0.125)
+}
+
+
+
+/* AP color palette */
+
+.ap-navbar-dark-grey {
+    background-color: #717375 !important
+}
+
+
+.ap-yellow {
+    background-color: #FCD116 !important
+}
+
+.ap-orange {
+    background-color: #F99B0C !important
+}
+
+.ap-dark-orange {
+    background-color: #F96B07 !important
+}
+
+.ap-pink {
+    background-color: #AF23A5 !important
+}
+
+.ap-purple {
+    background-color: #440099 !important
+}
+
+.ap-darknavy {
+    background-color: #003D68 !important
+}
+
+.ap-denim {
+    background-color: #6689CC !important
+}
+
+.ap-light-denim {
+    background-color: #75AADB !important
+}
+
+.ap-green {
+    background-color: #1EB53A !important
+}
+
+.ap-dark-green {
+    background-color: #006B3F !important
+}
+
+.ap-dark-grey {
+    background-color: #97999B !important
+}
+
+.ap-black {
+    background-color: #000000 !important
+}
+
+.ap-white {
+    background-color: #FFFFFF !important
+}
+
+
+._dash-undo-redo {
+    display: none;
+}
+
+.tab1_card_title {
+    text-align: center;
+    color: #ffffff;
+}
+
+.tab1_card_index {
+    text-align: center;
+    color: #ffffff;
+    padding-top: 5px;
+}
+
+  
+.card-scrollbar::-webkit-scrollbar-track {
+    -webkit-box-shadow: inset 0 0 6px rgba(0, 0, 0, 0.1);
+    background-color: #F5F5F5;
+    border-radius: 10px; }
+  
+.card-scrollbar::-webkit-scrollbar {
+    width: 10px;
+    background-color: #F5F5F5; }
+  
+.card-scrollbar::-webkit-scrollbar-thumb {
+    border-radius: 10px;
+    -webkit-box-shadow: inset 0 0 6px rgba(0, 0, 0, 0.1);
+    /* background-image: -webkit-linear-gradient(330deg, #e3e7eb 0%, #ffffff 60%); */
+    background-color: #e3e7eb;
+    /* background-image: linear-gradient(120deg, #e3e7eb 0%, #ffffff 60%);  */
+}
