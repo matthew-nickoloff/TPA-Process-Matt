@@ -25,7 +25,7 @@ DBLIST = [
     {'label': 'stjude_internal', 'value': 'stjude_internal'},
     {'label': 'retail_demo_internal', 'value': 'retail_demo_internal'},
     {'label': 'sandbox_internal', 'value': 'sandbox_internal'},
-    {'label': 'test','value':'science_sandbox'}
+    {'label': 'test','value':'science_sandbox_internal'}
 
 ]
 
