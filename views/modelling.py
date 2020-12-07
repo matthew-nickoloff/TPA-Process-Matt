@@ -3,7 +3,6 @@ import dash_html_components as html
 from dash.dependencies import Input, Output, State
 import dash_bootstrap_components as dbc
 
-import MTAfunction as MTA
 import config
 from constant import DBLIST
 
