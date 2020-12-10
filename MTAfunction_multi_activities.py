@@ -114,7 +114,8 @@ def available_mkey(conn_string,
                     ranked_dims_str,
                     kpi_col,
                     user_seg_col,
-                    user_seg
+                    user_seg,
+                    subset_threhold=20000
                 ):
 
     conn = psycopg2.connect(conn_string)
@@ -124,6 +125,114 @@ def available_mkey(conn_string,
     # However, since we don't do delete in multiple KPI case, double check to make sure "null" does not exist in metric_key
     # "and m0!=0???" --- m0 indicates converted users whose metric_key is very likely to be null instead of 0_0_0_0_0_......
 
+    start_time_handle_size = time.clock()
+
+    metric_key_sql_df = pd.read_sql('''with tokenized_slice as
+        (select userid, %s, %s from %s where m0=%s and %s=%s)
+        select count(distinct userid) as user_cnt,%s,%s 
+        from tokenized_slice
+        
+        group by %s,%s 
+        order by %s,%s;''' % (ranked_dims_str,
+                                   
+                                    kpi_col,
+                                    tokenized_table_name,
+                                    tactic_id,
+                                    user_seg_col,
+                                    user_seg, 
+                                   ranked_dims_str,
+                                    kpi_col,
+                                   ranked_dims_str,
+                                    kpi_col,
+                               ranked_dims_str,
+                                    kpi_col
+                                    ), conn)# metric_key not in lists will have '0_0_..._0'?
+
+#     print(metric_key_sql_df)
+    # set user cap for conversion and non-conversion to <=5000 per metric key
+    metric_key_sql_df.loc[metric_key_sql_df.user_cnt>subset_threhold, 'user_cnt']=subset_threhold
+    
+    metric_key_sql_df_need_subset=metric_key_sql_df[metric_key_sql_df.user_cnt==subset_threhold]
+    print(metric_key_sql_df_need_subset)
+    print( len(metric_key_sql_df_need_subset)*100/len(metric_key_sql_df),'% needs getting subsets')
+#     print(metric_key_sql_df)
+
+
+    string_test='create table user_sub_temp_{} as select * from '.format(tactic_id)
+    for row in range(len(metric_key_sql_df)):
+        string_test=string_test+' (select distinct userid from {} where m0={} and {}={} '.format(tokenized_table_name,
+                                                                                                 tactic_id,
+                                                                                                 user_seg_col,
+                                                                                                 user_seg,)
+        for col in metric_key_sql_df.columns[1:-1]:
+            string_test=string_test+' and {}={}'.format(col,metric_key_sql_df.loc[row,col] )
+        string_test=string_test+' and {}={} limit {}) union'.format(kpi_col,
+                                                                   metric_key_sql_df.loc[row,kpi_col],
+     
+                                                                    
+                                                                    metric_key_sql_df.loc[row,'user_cnt'])
+
+    
+    
+#     string_test2='create table user_sub_temp_{} as select * from '.format(tactic_id)
+#     for row in range(len(metric_key_sql_df)):
+#         string_test2=string_test2+' (select distinct userid from {} where m0={}'.format(tokenized_table_name,tactic_id)
+#         for col in metric_key_sql_df.columns[1:-1]:
+#             string_test2=string_test2+' and {}={}'.format(col,metric_key_sql_df.loc[row,col] )
+#         string_test2=string_test2+' and {}={} limit {}) union all '.format(kpi_col,
+#                                                                    metric_key_sql_df.loc[row,kpi_col],
+#                                                                    metric_key_sql_df.loc[row,'user_cnt'])
+
+    
+    
+        
+#     string_create_user_subset='''create table user_sub_temp as 
+#                                         select distinct userid from {} 
+#                                         where m0={} and {}="{}" and {}={} and {}={} limit {}'''.format(tokenized_table_name,                                                                                                           
+#                                                                                  tactic_id,
+#                                                                                                   ranked_dims_mkey,
+#                                                                                                  metric_key_sql_df.loc[0,'metric_key'],
+#                                                                                 user_seg_col,
+#                                                                                 user_seg,
+#                                                                                 kpi_col,
+#                                                                                             metric_key_sql_df.loc[0,kpi_col],
+#                                                                                                     metric_key_sql_df.loc[0,'user_cnt'])
+    
+
+    
+    if c.closed:
+        conn=psycopg2.connect(conn_string)
+        c=conn.cursor()
+      
+    c.execute('drop table if exists user_sub_temp_{}'.format(tactic_id))
+    
+    
+    start_time_query1 = time.clock()
+    c.execute(string_test[:-5] )
+
+    conn.commit()
+    
+#     logging.info("> Query1 used {} secs!".format(int(time.clock() - start_time_query1)))
+    
+#     c.execute('drop table if exists user_sub_temp_{}'.format(tactic_id))
+#     start_time_query2 = time.clock()
+#     c.execute(string_test2[:-11] )
+
+#     conn.commit()
+    
+#     logging.info("> Query2 used {} secs!".format(int(time.clock() - start_time_query2)))
+    
+
+
+
+    logging.info("> Handling data size used {} secs!".format(int(time.clock() - start_time_handle_size)))        
+
+    
+    
+    
+    
+    
+    start_time_handle_size_old = time.clock()
     metric_key_sql_df = pd.read_sql('''with tokenized_slice as
         (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and %s=%s)
 
@@ -139,9 +248,14 @@ def available_mkey(conn_string,
                                     user_seg, 
                                     kpi_col
                                     ), conn)
+    print(metric_key_sql_df)
+    logging.info("> Old Handling data size used {} secs!".format(int(time.clock() - start_time_handle_size_old)))  
 
     c.close()
     conn.close()
+    
+
+    
 
     return metric_key_sql_df
 
@@ -201,8 +315,8 @@ def database_data_processing(
                             conn_string,                            
                             tokenized_table_name,
                             timediscount,
-                            user_subset_table='user_sub4'):
-
+                            ):
+    user_subset_table='user_sub_temp_{}'.format(tactic_id)
     start_time = time.clock()
     conn = psycopg2.connect(conn_string)
     c = conn.cursor()
@@ -250,11 +364,16 @@ def database_data_processing(
         metric_key_sql_string5 = metric_key_sql_string5 + \
             "," + metric_key_sql_df['processed_column5'][i]
 
-    sample_size_conversion=10000
+#     sample_size_conversion=10000
     # conversion data
     if timediscount == 1:
         model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null and %s=%s and userid in (select userid from %s)),
+                                        (select userid, vtimestamp, %s as metric_key,
+                                        %s,
+                                        %s 
+                                        from %s 
+                                        where m0=%s and metric_key is not null 
+                                         and %s=%s and userid in (select userid from %s)),
         
         table1 as
             (select userid, vtimestamp as conversion_date from
@@ -1033,7 +1152,7 @@ def decomp(
     
     logging.info("> Preparing data for decomp used {} secs!".format( int(time.clock() - start_time_prepdecomp))) 
     
-    start_time_backward = time.clock()
+#     start_time_backward = time.clock()
     decomp1 = pd.DataFrame(best_mkey_lookup_all)[cols1]
     m = best_model_data.shape[1]
 
@@ -1076,9 +1195,9 @@ def decomp(
     decomp1['ROI'] = margin * \
         decomp1['Incremental_Conversion'] / decomp1['spend']
     decomp1['methodology'] = 'Backward Decomp'
-    logging.info("> Decomp - Backward used {} secs!".format( int(time.clock() - start_time_backward)))
+#     logging.info("> Decomp - Backward used {} secs!".format( int(time.clock() - start_time_backward)))
     # Option2:forward
-    start_time_forward = time.clock()
+#     start_time_forward = time.clock()
     decomp2 = pd.DataFrame(best_mkey_lookup_all)[cols1]
     decomp2['imps in the best model'] = decomp1['imps in the best model']
     decomp2['avg imps in the best model'] = decomp1['avg imps in the best model']
@@ -1105,7 +1224,7 @@ def decomp(
     decomp2['ROI'] = margin * \
         decomp2['Incremental_Conversion'] / decomp2['spend']
     decomp2['methodology'] = 'Forward Decomp'
-    logging.info("> Decomp - Forward used {} secs!".format( int(time.clock() - start_time_forward))) 
+#     logging.info("> Decomp - Forward used {} secs!".format( int(time.clock() - start_time_forward))) 
     # Op3:game theory
     start_time_gametheory = time.clock()
     mkey_cnt = len(best_mkey_lookup_all['metric_key'])
