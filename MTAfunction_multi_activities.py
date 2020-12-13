@@ -120,7 +120,7 @@ def available_mkey(conn_string,
                     kpi_col,
                     user_seg_col,
                     user_seg,
-                    subset_threhold=20000,
+                    subset_threhold=10000,
                     total_conversion_threhold=50000,
                    total_nonconversion_threhold=100000,
                    
@@ -135,7 +135,7 @@ def available_mkey(conn_string,
     # However, since we don't do delete in multiple KPI case, double check to make sure "null" does not exist in metric_key
     # "and m0!=0???" --- m0 indicates converted users whose metric_key is very likely to be null instead of 0_0_0_0_0_......
 
-    start_time_handle_size_old = time.clock()
+#     start_time_handle_size_old = time.clock()
     metric_key_sql_df = pd.read_sql('''with tokenized_slice as
         (select userid,%s as metric_key, 
         
@@ -155,7 +155,7 @@ def available_mkey(conn_string,
                                     ), conn)
     print('check metric_key with converions')
     print(metric_key_sql_df)
-    logging.info("> Old Handling data size used {} secs!".format(int(time.clock() - start_time_handle_size_old)))  
+#     logging.info("> Old Handling data size used {} secs!".format(int(time.clock() - start_time_handle_size_old)))  
 
     
     if len(metric_key_sql_df)>0:
@@ -215,18 +215,8 @@ def available_mkey(conn_string,
                                                                        &(metric_key_sql_df_temp['user_cnt']>0),'metric_key']                       
             # set user cap for conversion and non-conversion to <=5000 per metric key
             print(metric_key_list_with_conversion)
-
-
             metric_key_sql_df_temp=metric_key_sql_df_temp.merge(metric_key_list_with_conversion,on='metric_key')
-    #         print('test')
-    #         print(metric_key_sql_df_temp)
-
             metric_key_sql_df_temp.loc[metric_key_sql_df_temp.user_cnt>subset_threhold, 'user_cnt']=subset_threhold
-
-        #     metric_key_sql_df_need_subset=metric_key_sql_df_temp[metric_key_sql_df_temp.user_cnt==subset_threhold]
-        #     print(metric_key_sql_df_need_subset)
-
-
 
             string_test='create table user_sub_temp_{} as select * from '.format(tactic_id)
             for row in range(len(metric_key_sql_df_temp)):
@@ -237,7 +227,7 @@ def available_mkey(conn_string,
                 for col in metric_key_sql_df_temp.columns[1:-2]:
                     string_test=string_test+' and {}={}'.format(col,metric_key_sql_df_temp.loc[row,col] )
                 string_test=string_test+' and {}={} limit {}) union'.format(kpi_col,
-                                                                           metric_key_sql_df_temp.loc[row,kpi_col],                                                                         
+                                                                           metric_key_sql_df_temp.loc[row,kpi_col],                                                      
                                                                             metric_key_sql_df_temp.loc[row,'user_cnt'])
 
 
@@ -256,7 +246,7 @@ def available_mkey(conn_string,
 
 
 
-            logging.info("> Handling data size used {} secs!".format(int(time.clock() - start_time_handle_size)))        
+            logging.info("> Creating user subset used {} secs!".format(int(time.clock() - start_time_handle_size)))        
 
             c.close()
             conn.close()
