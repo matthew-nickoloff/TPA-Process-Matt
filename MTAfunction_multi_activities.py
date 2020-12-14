@@ -177,27 +177,37 @@ def available_mkey(conn_string,
     if len(metric_key_sql_df)>0:
         # check if need sub-sampling on userid
         start_time_check_sampling_need = time.clock()
-        user_count_df = pd.read_sql('''select %s,count(distinct userid) as user_cnt 
+        user_count_df = pd.read_sql('''select count(distinct userid) as user_cnt 
                                               from %s where m0=%s and %s=%s 
-                                              group by %s;''' % ( kpi_col,
+                                              ;''' % ( 
+#             kpi_col,
                                                                     tokenized_table_name,
                                                                     tactic_id,
                                                                     user_seg_col,
                                                                     user_seg, 
-                                                                    kpi_col
+#                                                                     kpi_col
                                                                     ), conn)
+#         user_count_df = pd.read_sql('''select %s,count(distinct userid) as user_cnt 
+#                                               from %s where m0=%s and %s=%s 
+#                                               group by %s;''' % ( kpi_col,
+#                                                                     tokenized_table_name,
+#                                                                     tactic_id,
+#                                                                     user_seg_col,
+#                                                                     user_seg, 
+#                                                                     kpi_col
+#                                                                     ), conn)
     #     select m0,cm1,count(distinct userid) from tokenized_test_data group by m0,cm1 order by m0,cm1; --9.25s
 
         print('check user_count_df')
         print(user_count_df)
-        if user_count_df['user_cnt'].sum()>100000:
+        if user_count_df['user_cnt'][0]>100000:
             need_sampling=True
         else:
             need_sampling=False
-        conversion_need_sampling=user_count_df.loc[user_count_df[kpi_col]==1,'user_cnt'].values[0]>total_conversion_threhold
-        nonconversion_need_sampling=user_count_df.loc[user_count_df[kpi_col]==0,'user_cnt'].values[0]>total_nonconversion_threhold
-        print('conversion_need_sampling')    
-        print(conversion_need_sampling)
+#         conversion_need_sampling=user_count_df.loc[user_count_df[kpi_col]==1,'user_cnt'].values[0]>total_conversion_threhold
+#         nonconversion_need_sampling=user_count_df.loc[user_count_df[kpi_col]==0,'user_cnt'].values[0]>total_nonconversion_threhold
+#         print('conversion_need_sampling')    
+#         print(conversion_need_sampling)
 
         logging.info("> Check sampling needs used {} secs!".format(int(time.clock() - start_time_check_sampling_need)))  
 

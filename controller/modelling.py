@@ -88,6 +88,12 @@ def register_callback_m(app):
                 
 
                 logging.info("> Database is connected.")
+                
+                if semaphore.is_locked():
+                    raise Exception('Resource is locked')
+
+                semaphore.lock()   
+                
 
                 if not all_table_exist:
                     logging.info('> Some of the tables does not exist! Please check and try again!')
@@ -140,10 +146,10 @@ def register_callback_m(app):
                         else:
                             logging.info("> All relevant tables/columns exist, start running model. Please hold on!")
                             
-                            if semaphore.is_locked():
-                                raise Exception('Resource is locked')
+#                             if semaphore.is_locked():
+#                                 raise Exception('Resource is locked')
                                     
-                            semaphore.lock()                                    
+#                             semaphore.lock()                                    
 
                             logging.info("> Thank you for the info! Your Mix Master will be generated in s3://analytic-partners/{} shortly!".format(directory))
 
