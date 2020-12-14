@@ -122,7 +122,7 @@ def available_mkey(conn_string,
                     user_seg,
                     subset_threhold=10000,
                     total_conversion_threhold=50000,
-                   total_nonconversion_threhold=100000,
+                   total_nonconversion_threhold=150000,
                    
 
                    
@@ -136,22 +136,38 @@ def available_mkey(conn_string,
     # "and m0!=0???" --- m0 indicates converted users whose metric_key is very likely to be null instead of 0_0_0_0_0_......
 
 #     start_time_handle_size_old = time.clock()
-    metric_key_sql_df = pd.read_sql('''with tokenized_slice as
-        (select userid,%s as metric_key, 
+#     metric_key_sql_df = pd.read_sql('''with tokenized_slice as
+#         (select %s as metric_key, 
         
-        %s from %s where m0=%s and %s=%s)
+#         %s=1 from %s where m0=%s and %s=%s)
 
-        select distinct metric_key 
-        from tokenized_slice
-        where %s=1 and metric_key is not null
+#         select distinct metric_key 
+#         from tokenized_slice
+#         where metric_key is not null
+#         order by metric_key;''' % (ranked_dims_mkey,
+# #                                     ranked_dims_str,
+#                                     kpi_col,
+#                                     tokenized_table_name,
+#                                     tactic_id,
+#                                     user_seg_col,
+#                                     user_seg 
+                                    
+#                                     ), conn)
+    
+    metric_key_sql_df = pd.read_sql('''
+
+        select distinct  %s as metric_key
+        from %s
+        where %s=1 and m0=%s and %s=%s and metric_key is not null
         order by metric_key;''' % (ranked_dims_mkey,
 #                                     ranked_dims_str,
-                                    kpi_col,
+#                                     
                                     tokenized_table_name,
+                                   kpi_col,
                                     tactic_id,
                                     user_seg_col,
-                                    user_seg, 
-                                    kpi_col
+                                    user_seg 
+                                    
                                     ), conn)
     print('check metric_key with converions')
     print(metric_key_sql_df)
@@ -174,7 +190,10 @@ def available_mkey(conn_string,
 
         print('check user_count_df')
         print(user_count_df)
-
+        if user_count_df['user_cnt'].sum()>100000:
+            need_sampling=True
+        else:
+            need_sampling=False
         conversion_need_sampling=user_count_df.loc[user_count_df[kpi_col]==1,'user_cnt'].values[0]>total_conversion_threhold
         nonconversion_need_sampling=user_count_df.loc[user_count_df[kpi_col]==0,'user_cnt'].values[0]>total_nonconversion_threhold
         print('conversion_need_sampling')    
@@ -185,7 +204,7 @@ def available_mkey(conn_string,
 
 
     
-        if conversion_need_sampling and nonconversion_need_sampling:
+        if need_sampling:#conversion_need_sampling or nonconversion_need_sampling: #and
             start_time_handle_size = time.clock()
 
             metric_key_sql_df_temp = pd.read_sql('''with tokenized_slice as
@@ -380,9 +399,10 @@ def database_data_processing(
     # conversion data
     if len(sample_user_tablename)>0:
         usersub_string=' and userid in (select userid from {})'.format(sample_user_tablename)
-        logging.info("> Using user subset !")  
+ 
     else:
-        usersub_string=''
+        usersub_string=' and {} = {} '.format(user_seg_col,
+                                              user_seg)
         
     if timediscount == 1:
         model_data = pd.read_sql('''with tokenized_slice as
@@ -390,8 +410,8 @@ def database_data_processing(
                                        
                                         %s 
                                         from %s 
-                                        where m0=%s and metric_key is not null 
-                                        %s),
+                                        where m0=%s  
+                                        %s and metric_key is not null),
         
         table1 as
             (select userid, vtimestamp as conversion_date from
@@ -434,7 +454,7 @@ def database_data_processing(
        
         
         model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s from %s where m0=%s and metric_key is not null %s),
+        (select userid,  %s as metric_key from %s where m0=%s %s and %s=1 and metric_key is not null),
         
         model_data_mta as
             (select userid,
@@ -446,29 +466,30 @@ def database_data_processing(
                             metric_key,
                             count(*) as sum_test
                             from tokenized_slice t
-                            where t.%s=1
+                            
                             group by userid,metric_key) a
                     ) group by userid)
                             
         select %s, %s from model_data_mta
        ;''' % (ranked_dims_mkey,
 #                                             ranked_dims_str,
-                                            kpi_col,
+                                            
                                             tokenized_table_name,
                                             tactic_id,
 #                                             user_seg_col,
 #                                             user_seg,
                                             usersub_string,
+                                          kpi_col,
                                             metric_key_sql_string2,
                                             kpi_col,
                                             metric_key_sql_string,
-                                            kpi_col,
+                                            
                                             metric_key_sql_string5,
                                             kpi_col), conn, chunksize=5000)
     model_data = pd.concat(model_data).reset_index(drop=True)
     print('conversion user count',str(len(model_data)))
     conversion_metric_averages = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
+        (select userid, %s as metric_key from %s where %s=1 and m0=%s  %s and metric_key is not null),
 
         model_data_mta as
             (select userid,
@@ -480,15 +501,16 @@ def database_data_processing(
                         metric_key,
                         count(*) as sum_test
                         from tokenized_slice t
-                        where t.%s=1
+                       
                         group by userid,metric_key) a
                 ) group by userid)
         
         select %s from model_data_mta;''' % (
                             ranked_dims_mkey,
 #                             ranked_dims_str,
-                            kpi_col,
+#                            
                             tokenized_table_name,
+                            kpi_col,
                             tactic_id,
 #                             user_seg_col,
 #                             user_seg,
@@ -496,7 +518,7 @@ def database_data_processing(
                             metric_key_sql_string2,
                             kpi_col,
                             metric_key_sql_string,
-                            kpi_col,
+#                             kpi_col,
                             metric_key_sql_string3), conn)
 
     conversion_metric_averages = conversion_metric_averages.iloc[0, :]
@@ -629,7 +651,7 @@ def database_data_processing(
     
     elif timediscount==0 and mta_partial_seg!=[1]:          # run MTA with fully available user segment info or not using user segment info
         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
+        (select userid, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
         
         non_conversion_model_data_mta as
             (select userid,
@@ -1251,72 +1273,72 @@ def decomp(
     # Op3:game theory
     start_time_gametheory = time.clock()
     mkey_cnt = len(best_mkey_lookup_all['metric_key'])
-#     if mkey_cnt <= 20:
-#         def ncr(n, r):
-#             r = min(r, n - r)
-#             if r == 0:
-#                 return 1
-#             numer = ft.reduce(op.mul, range(n, n - r, -1))
-#             denom = ft.reduce(op.mul, range(1, r + 1))
-#             return numer // denom
+    if mkey_cnt <= 5:
+        def ncr(n, r):
+            r = min(r, n - r)
+            if r == 0:
+                return 1
+            numer = ft.reduce(op.mul, range(n, n - r, -1))
+            denom = ft.reduce(op.mul, range(1, r + 1))
+            return numer // denom
 
-#         combination_cnt = 0
-#         for i in range(0, mkey_cnt + 1):
-#             combination_cnt = combination_cnt + ncr(mkey_cnt, i)
+        combination_cnt = 0
+        for i in range(0, mkey_cnt + 1):
+            combination_cnt = combination_cnt + ncr(mkey_cnt, i)
 
-#         mkey = best_mkey_lookup_all.loc[:, 'metric_key'].tolist()
-#         GT1 = pd.DataFrame(np.matlib.zeros((1, len(mkey))))
-#         GT1.columns = mkey
-#         GT1.iloc[0, :] = average_imp.tolist()
-#         GT2 = pd.DataFrame(np.matlib.zeros((combination_cnt, len(mkey))))
-#         GT2.columns = mkey
-#         com_cnt_temp = combination_cnt
+        mkey = best_mkey_lookup_all.loc[:, 'metric_key'].tolist()
+        GT1 = pd.DataFrame(np.matlib.zeros((1, len(mkey))))
+        GT1.columns = mkey
+        GT1.iloc[0, :] = average_imp.tolist()
+        GT2 = pd.DataFrame(np.matlib.zeros((combination_cnt, len(mkey))))
+        GT2.columns = mkey
+        com_cnt_temp = combination_cnt
 
-#         for i in range(0, len(mkey)):
-#             com_cnt_temp = com_cnt_temp / 2
-#             buck_cnt = int(combination_cnt / com_cnt_temp)
-#             for j in range(0, buck_cnt, 2):
-#                 GT2.loc[j *
-#                         com_cnt_temp:(j +
-#                                       1) *
-#                         com_cnt_temp -
-#                         1, mkey[i]] = GT1.loc[0, mkey[i]]
+        for i in range(0, len(mkey)):
+            com_cnt_temp = com_cnt_temp / 2
+            buck_cnt = int(combination_cnt / com_cnt_temp)
+            for j in range(0, buck_cnt, 2):
+                GT2.loc[j *
+                        com_cnt_temp:(j +
+                                      1) *
+                        com_cnt_temp -
+                        1, mkey[i]] = GT1.loc[0, mkey[i]]
 
-#         GT_prob = pd.DataFrame(best_model.predict_proba(GT2).tolist())
-#         GT_prob.columns = ['prob_0', 'prob_1']
-#         GT2['prob_1'] = GT_prob['prob_1']
-#         ROI_r = []
-#         for i in range(0, len(mkey)):
-#             mk1 = GT2.loc[GT2.iloc[:, i] > 0].drop(GT2.columns[i], axis=1)
-#             mk0 = GT2.loc[GT2.iloc[:, i] == 0].drop(GT2.columns[i], axis=1)
-#             mk1 = mk1.rename(columns={'prob_1': 'mkey1_prob'})
-#             mk0 = mk0.rename(columns={'prob_1': 'mkey0_prob'})
-#             mg_df = pd.merge(mk1, mk0, how='inner',
-#                              on=mk1.columns[0:len(mkey) - 1].tolist())           
-#             ROI_r.append((mg_df['mkey1_prob'] - mg_df['mkey0_prob']).mean())
-#         decomp3 = decomp1[cols1]
-#         decomp3.loc[:, 'incrementality_GameTheory'] = ROI_r
-#         decomp3.loc[:, 'spend'] = decomp1['spend']
-#         decomp3.loc[:, 'margin'] = decomp1['margin']
-#         decomp3.loc[:, 'seen_users_sums_best'] = seen_users_sums_best
-#         decomp3.loc[:, 'converted_users'] = converted_users
+        GT_prob = pd.DataFrame(best_model.predict_proba(GT2).tolist())
+        GT_prob.columns = ['prob_0', 'prob_1']
+        GT2['prob_1'] = GT_prob['prob_1']
+        ROI_r = []
+        for i in range(0, len(mkey)):
+            mk1 = GT2.loc[GT2.iloc[:, i] > 0].drop(GT2.columns[i], axis=1)
+            mk0 = GT2.loc[GT2.iloc[:, i] == 0].drop(GT2.columns[i], axis=1)
+            mk1 = mk1.rename(columns={'prob_1': 'mkey1_prob'})
+            mk0 = mk0.rename(columns={'prob_1': 'mkey0_prob'})
+            mg_df = pd.merge(mk1, mk0, how='inner',
+                             on=mk1.columns[0:len(mkey) - 1].tolist())           
+            ROI_r.append((mg_df['mkey1_prob'] - mg_df['mkey0_prob']).mean())
+        decomp3 = decomp1[cols1]
+        decomp3.loc[:, 'incrementality_GameTheory'] = ROI_r
+        decomp3.loc[:, 'spend'] = decomp1['spend']
+        decomp3.loc[:, 'margin'] = decomp1['margin']
+        decomp3.loc[:, 'seen_users_sums_best'] = seen_users_sums_best
+        decomp3.loc[:, 'converted_users'] = converted_users
 
-#         decomp3.loc[:, 'Model Data Incremental Conversion'] = total_converted_users * \
-#             decomp3['incrementality_GameTheory'] / sum(decomp3['incrementality_GameTheory'])
-#         decomp3.loc[decomp3['Model Data Incremental Conversion'] >= decomp3.loc[:,
-#                                                                                 'converted_users'], 'Model Data Incremental > converted'] = 'Yes'
-#         decomp3.loc[decomp3['Model Data Incremental Conversion'] < decomp3[
-#             'converted_users'], 'Model Data Incremental > converted'] = ' '
-#         # scaling_factor3=total_converted_users*digital_incrementality/total_population/sum(decomp3['incrementality_GameTheory'])
-#         # decomp3['ScalingFactor3_DigitalInc%s'%digital_incrementality]=scaling_factor3
-#         decomp3.loc[:, 'Incremental_Conversion'] = digital_incremental_volume * \
-#             decomp3['incrementality_GameTheory'] / sum(decomp3['incrementality_GameTheory'])
-#         decomp3.loc[:, 'ROI'] = margin * \
-#             decomp3['Incremental_Conversion'] / spend
-#         decomp3.loc[:, 'methodology'] = 'Game Theory'
+        decomp3.loc[:, 'Model Data Incremental Conversion'] = total_converted_users * \
+            decomp3['incrementality_GameTheory'] / sum(decomp3['incrementality_GameTheory'])
+        decomp3.loc[decomp3['Model Data Incremental Conversion'] >= decomp3.loc[:,
+                                                                                'converted_users'], 'Model Data Incremental > converted'] = 'Yes'
+        decomp3.loc[decomp3['Model Data Incremental Conversion'] < decomp3[
+            'converted_users'], 'Model Data Incremental > converted'] = ' '
+        # scaling_factor3=total_converted_users*digital_incrementality/total_population/sum(decomp3['incrementality_GameTheory'])
+        # decomp3['ScalingFactor3_DigitalInc%s'%digital_incrementality]=scaling_factor3
+        decomp3.loc[:, 'Incremental_Conversion'] = digital_incremental_volume * \
+            decomp3['incrementality_GameTheory'] / sum(decomp3['incrementality_GameTheory'])
+        decomp3.loc[:, 'ROI'] = margin * \
+            decomp3['Incremental_Conversion'] / spend
+        decomp3.loc[:, 'methodology'] = 'Game Theory'
 
-#     else:
-    decomp3 = pd.DataFrame()
+    else:
+        decomp3 = pd.DataFrame()
 
         
     logging.info("> Decomp - Game Theory used {} secs!".format( int(time.clock() - start_time_gametheory)))    
@@ -1351,20 +1373,20 @@ def decomp(
 
 
 
-#     if mkey_cnt <= 20:
-#         decomp_com = decomp1[cols].append(
-#         decomp2[cols],
-#         ignore_index=True).append(
-#         decomp3[cols],
-#         ignore_index=True).append(
-#             decomp4[cols],
-#         ignore_index=True)
-#     else: 
-    decomp_com = decomp1[cols].append(
-    decomp2[cols],
-    ignore_index=True).append(
-        decomp4[cols],
-    ignore_index=True)
+    if mkey_cnt <= 5:
+        decomp_com = decomp1[cols].append(
+        decomp2[cols],
+        ignore_index=True).append(
+        decomp3[cols],
+        ignore_index=True).append(
+            decomp4[cols],
+        ignore_index=True)
+    else: 
+        decomp_com = decomp1[cols].append(
+        decomp2[cols],
+        ignore_index=True).append(
+            decomp4[cols],
+        ignore_index=True)
     
     
     decomp_com['model_strength']=float(best_mode_validation_metric)
