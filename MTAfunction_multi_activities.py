@@ -411,10 +411,14 @@ def database_data_processing(
     # conversion data
     if len(sample_user_tablename)>0:
         usersub_string=' and userid in (select userid from {})'.format(sample_user_tablename)
- 
+        nonconversion_string=' and userid in (select userid from {})'.format(sample_user_tablename)
     else:
         usersub_string=' and {} = {} '.format(user_seg_col,
                                               user_seg)
+        if mta_partial_seg!=[1]:
+            nonconversion_string=' and {} = {} '.format(user_seg_col,user_seg)
+        else:
+            nonconversion_string=''
         
     if timediscount == 1:
         model_data = pd.read_sql('''with tokenized_slice as
@@ -575,7 +579,7 @@ def database_data_processing(
                         kpi_col,
                         tokenized_table_name,
                         tactic_id,
-                        usersub_string,
+                        nonconversion_string,
                         kpi_col,
                         metric_key_sql_string2,
                         kpi_col,
@@ -652,7 +656,7 @@ def database_data_processing(
                         kpi_col,
                         tokenized_table_name,
                         tactic_id,
-                        usersub_string,
+                        nonconversion_string,
                         metric_key_sql_string2,
                         kpi_col,
                         metric_key_sql_string,
