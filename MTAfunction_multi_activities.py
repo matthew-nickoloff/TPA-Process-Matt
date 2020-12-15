@@ -121,8 +121,9 @@ def available_mkey(conn_string,
                     user_seg_col,
                     user_seg,
                     subset_threhold=10000,
-                    total_conversion_threhold=50000,
-                   total_nonconversion_threhold=150000,
+                   total_user_threhold=100000,#if unique user count goes above this number then usersubset will be created
+#                     total_conversion_threhold=50000,
+#                    total_nonconversion_threhold=150000,
                    
 
                    
@@ -169,8 +170,9 @@ def available_mkey(conn_string,
                                     user_seg 
                                     
                                     ), conn)
-    print('check metric_key with converions')
-    print(metric_key_sql_df)
+ 
+    
+    logging.error("> Number of metric_keys that with conversions: {}".format(len(metric_key_sql_df)) )
 #     logging.info("> Old Handling data size used {} secs!".format(int(time.clock() - start_time_handle_size_old)))  
 
     
@@ -198,9 +200,9 @@ def available_mkey(conn_string,
 #                                                                     ), conn)
     #     select m0,cm1,count(distinct userid) from tokenized_test_data group by m0,cm1 order by m0,cm1; --9.25s
 
-        print('check user_count_df')
-        print(user_count_df)
-        if user_count_df['user_cnt'][0]>100000:
+        logging.error("> Total number of unique users: {}".format(str(user_count_df['user_cnt'][0])) )
+        
+        if user_count_df['user_cnt'][0]>total_user_threhold:
             need_sampling=True
         else:
             need_sampling=False
@@ -242,8 +244,8 @@ def available_mkey(conn_string,
 
             metric_key_list_with_conversion=metric_key_sql_df_temp.loc[(metric_key_sql_df_temp[kpi_col]==1)\
                                                                        &(metric_key_sql_df_temp['user_cnt']>0),'metric_key']                       
-            # set user cap for conversion and non-conversion to <=5000 per metric key
-            print(metric_key_list_with_conversion)
+            # set user cap for conversion and non-conversion to x per metric key
+            
             metric_key_sql_df_temp=metric_key_sql_df_temp.merge(metric_key_list_with_conversion,on='metric_key')
             metric_key_sql_df_temp.loc[metric_key_sql_df_temp.user_cnt>subset_threhold, 'user_cnt']=subset_threhold
 
@@ -541,7 +543,7 @@ def database_data_processing(
  
 
     # non-conversion data
-    if timediscount == 1 and mta_partial_seg==[1]:          # run MTA wth partial user segment info
+    if timediscount == 1:          # run MTA wth partial user segment info
         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
         (select userid, vtimestamp, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
 
@@ -583,53 +585,53 @@ def database_data_processing(
                         metric_key_sql_string5,
                         kpi_col), conn, chunksize=5000)
 
-    elif timediscount == 1 and mta_partial_seg!=[1]:            # run MTA with fully available user segment info or not using user segment info
-        non_conversion_model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
+#     elif timediscount == 1 and mta_partial_seg!=[1]:            # run MTA with fully available user segment info or not using user segment info
+#         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
+#         (select userid, vtimestamp, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
 
-        table1 as
-            (select userid, vtimestamp as conversion_date from
-                (select *, row_number() over (partition by userid order by vtimestamp desc) as rk from tokenized_slice) where rk=1 and %s=0),
+#         table1 as
+#             (select userid, vtimestamp as conversion_date from
+#                 (select *, row_number() over (partition by userid order by vtimestamp desc) as rk from tokenized_slice) where rk=1 and %s=0),
         
-        table2 as
-            (select a.*, floor(datediff(mins,vtimestamp,conversion_date)/10080) as wk_from_conversion_weight 
-            from tokenized_slice a join table1 on a.userid=table1.userid),
+#         table2 as
+#             (select a.*, floor(datediff(mins,vtimestamp,conversion_date)/10080) as wk_from_conversion_weight 
+#             from tokenized_slice a join table1 on a.userid=table1.userid),
         
-        non_conversion_model_data_mta as
-            (select userid,%s 0 as %s
-            from
-                (select userid, %s
-                from
-                    (select userid,
-                        metric_key,
-                        sum(1/((1+0.5)^wk_from_conversion_weight)) as sum_test
-                    from table2
-                    where metric_key in (select distinct metric_key from tokenized_slice where %s=1) 
-                        and %s=0
-                    group by userid,metric_key) a )
-                    group by userid)
+#         non_conversion_model_data_mta as
+#             (select userid,%s 0 as %s
+#             from
+#                 (select userid, %s
+#                 from
+#                     (select userid,
+#                         metric_key,
+#                         sum(1/((1+0.5)^wk_from_conversion_weight)) as sum_test
+#                     from table2
+#                     where metric_key in (select distinct metric_key from tokenized_slice where %s=1) 
+#                         and %s=0
+#                     group by userid,metric_key) a )
+#                     group by userid)
 
-        select %s, %s from non_conversion_model_data_mta
-       ;''' % (ranked_dims_mkey,
-#                         ranked_dims_str,
-                        kpi_col,
-                        tokenized_table_name,
-                        tactic_id,
-#                         user_seg_col,
-#                         user_seg,
-                        usersub_string,
-                        kpi_col,
-                        metric_key_sql_string2,
-                        kpi_col,
-                        metric_key_sql_string,
-                        kpi_col,
-                        kpi_col,
-                        metric_key_sql_string5,
-                        kpi_col), conn, chunksize=5000)
+#         select %s, %s from non_conversion_model_data_mta
+#        ;''' % (ranked_dims_mkey,
+# #                         ranked_dims_str,
+#                         kpi_col,
+#                         tokenized_table_name,
+#                         tactic_id,
+# #                         user_seg_col,
+# #                         user_seg,
+#                         usersub_string,
+#                         kpi_col,
+#                         metric_key_sql_string2,
+#                         kpi_col,
+#                         metric_key_sql_string,
+#                         kpi_col,
+#                         kpi_col,
+#                         metric_key_sql_string5,
+#                         kpi_col), conn, chunksize=5000)
 
-    elif timediscount == 0 and mta_partial_seg==[1]:            # run MTA wth partial user segment info
+    elif timediscount == 0 :            # run MTA wth partial user segment info
         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s from %s where m0=%s and metric_key is not null %s),
+        (select userid,  %s as metric_key, %s from %s where m0=%s  %s and metric_key is not null),
         
         non_conversion_model_data_mta as
             (select userid,
@@ -659,39 +661,39 @@ def database_data_processing(
                         metric_key_sql_string5,
                         kpi_col), conn, chunksize=5000)
     
-    elif timediscount==0 and mta_partial_seg!=[1]:          # run MTA with fully available user segment info or not using user segment info
-        non_conversion_model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
+#     elif timediscount==0 and mta_partial_seg!=[1]:          # run MTA with fully available user segment info or not using user segment info
+#         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
+#         (select userid, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
         
-        non_conversion_model_data_mta as
-            (select userid,
-            %s 0 as %s
-            from (select userid, %s from
-                (select userid,
-                        metric_key,
-                        count(*) as sum_test
-                from tokenized_slice
-                where metric_key in (select distinct metric_key from tokenized_slice where %s=1)
-                        and %s=0
-                group by userid,metric_key) a)
-            group by userid)
+#         non_conversion_model_data_mta as
+#             (select userid,
+#             %s 0 as %s
+#             from (select userid, %s from
+#                 (select userid,
+#                         metric_key,
+#                         count(*) as sum_test
+#                 from tokenized_slice
+#                 where metric_key in (select distinct metric_key from tokenized_slice where %s=1)
+#                         and %s=0
+#                 group by userid,metric_key) a)
+#             group by userid)
 
-        select %s, %s from non_conversion_model_data_mta
-      ;''' % (ranked_dims_mkey,
-#                         ranked_dims_str,
-                        kpi_col,
-                        tokenized_table_name,
-                        tactic_id,
-#                         user_seg_col,
-#                         user_seg,
-                        usersub_string,
-                        metric_key_sql_string2,
-                        kpi_col,
-                        metric_key_sql_string,
-                        kpi_col,
-                        kpi_col,
-                        metric_key_sql_string5,
-                        kpi_col), conn, chunksize=5000)
+#         select %s, %s from non_conversion_model_data_mta
+#       ;''' % (ranked_dims_mkey,
+# #                         ranked_dims_str,
+#                         kpi_col,
+#                         tokenized_table_name,
+#                         tactic_id,
+# #                         user_seg_col,
+# #                         user_seg,
+#                         usersub_string,
+#                         metric_key_sql_string2,
+#                         kpi_col,
+#                         metric_key_sql_string,
+#                         kpi_col,
+#                         kpi_col,
+#                         metric_key_sql_string5,
+#                         kpi_col), conn, chunksize=5000)
     non_conversion_model_data = pd.concat(non_conversion_model_data).reset_index(drop=True)
     print('non-conversion user count',str(len(non_conversion_model_data)))
 #     print('non-conversion should be count',str(sample_size))
