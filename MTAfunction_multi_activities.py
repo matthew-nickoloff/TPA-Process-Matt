@@ -120,6 +120,7 @@ def available_mkey(conn_string,
                     kpi_col,
                     user_seg_col,
                     user_seg,
+                   mta_partial_seg,
                     subset_threhold=10000,
                    total_user_threhold=100000,#if unique user count goes above this number then usersubset will be created
 #                     total_conversion_threhold=50000,
@@ -179,25 +180,32 @@ def available_mkey(conn_string,
     if len(metric_key_sql_df)>0:
         # check if need sub-sampling on userid
         start_time_check_sampling_need = time.clock()
-        user_count_df = pd.read_sql('''select count(distinct userid) as user_cnt 
+        if mta_partial_seg!=[1]:
+            user_count_df = pd.read_sql('''select count(distinct userid) as user_cnt 
                                               from %s where m0=%s and %s=%s 
+                                              ;''' % ( tokenized_table_name,
+                                                        tactic_id,
+                                                        user_seg_col,
+                                                        user_seg
+                                                        ), conn)
+        else:
+        
+            user_count_df = pd.read_sql('''select sum(user_cnt) as user_cnt 
+                                              from 
+                                              (select count(distinct userid) as user_cnt from %s where %s=1 and m0=%s and %s=%s) 
+                                              union
+                                               (select count(distinct userid) as user_cnt from %s where %s=0 and m0=%s)
                                               ;''' % ( 
-#             kpi_col,
                                                                     tokenized_table_name,
+                                                                    kpi_col,
                                                                     tactic_id,
                                                                     user_seg_col,
-                                                                    user_seg, 
-#                                                                     kpi_col
+                                                                    user_seg,
+                                                                    tokenized_table_name,
+                                                                    kpi_col,
+                                                                    tactic_id                                                                   
+                                                                    
                                                                     ), conn)
-#         user_count_df = pd.read_sql('''select %s,count(distinct userid) as user_cnt 
-#                                               from %s where m0=%s and %s=%s 
-#                                               group by %s;''' % ( kpi_col,
-#                                                                     tokenized_table_name,
-#                                                                     tactic_id,
-#                                                                     user_seg_col,
-#                                                                     user_seg, 
-#                                                                     kpi_col
-#                                                                     ), conn)
     #     select m0,cm1,count(distinct userid) from tokenized_test_data group by m0,cm1 order by m0,cm1; --9.25s
 
         logging.error("> Total number of unique users: {}".format(str(user_count_df['user_cnt'][0])) )
@@ -250,17 +258,38 @@ def available_mkey(conn_string,
             metric_key_sql_df_temp.loc[metric_key_sql_df_temp.user_cnt>subset_threhold, 'user_cnt']=subset_threhold
 
             string_test='create table user_sub_temp_{} as select * from '.format(tactic_id)
-            for row in range(len(metric_key_sql_df_temp)):
+            
+ 
+            if mta_partial_seg!=[1]:
+                nonconversion_string=' and {} = {} '.format(user_seg_col,user_seg)
+            else:
+                nonconversion_string=''
+                
+            metric_key_sql_df_temp_conversion=metric_key_sql_df_temp[metric_key_sql_df_temp[kpi_col]==1].reset_index(drop=True)
+            metric_key_sql_df_temp_nonconversion=metric_key_sql_df_temp[metric_key_sql_df_temp[kpi_col]==0].reset_index(drop=True)
+            
+            
+            for row in range(len(metric_key_sql_df_temp_conversion)):
                 string_test=string_test+' (select distinct userid from {} where m0={} and {}={} '.format(tokenized_table_name,
                                                                                                          tactic_id,
                                                                                                          user_seg_col,
                                                                                                          user_seg,)
-                for col in metric_key_sql_df_temp.columns[1:-2]:
-                    string_test=string_test+' and {}={}'.format(col,metric_key_sql_df_temp.loc[row,col] )
+                for col in metric_key_sql_df_temp_conversion.columns[1:-2]:
+                    string_test=string_test+' and {}={}'.format(col,metric_key_sql_df_temp_conversion.loc[row,col] )
                 string_test=string_test+' and {}={} limit {}) union'.format(kpi_col,
-                                                                           metric_key_sql_df_temp.loc[row,kpi_col],                                                      
-                                                                            metric_key_sql_df_temp.loc[row,'user_cnt'])
-
+                                                                           metric_key_sql_df_temp_conversion.loc[row,kpi_col],                                                      
+                                                                            metric_key_sql_df_temp_conversion.loc[row,'user_cnt'])
+            
+            
+            for row in range(len(metric_key_sql_df_temp_nonconversion)):
+                string_test=string_test+' (select distinct userid from {} where m0={} {} '.format(tokenized_table_name,
+                                                                                                         tactic_id,
+                                                                                                         nonconversion_string)
+                for col in metric_key_sql_df_temp_nonconversion.columns[1:-2]:
+                    string_test=string_test+' and {}={}'.format(col,metric_key_sql_df_temp_nonconversion.loc[row,col] )
+                string_test=string_test+' and {}={} limit {}) union'.format(kpi_col,
+                                                                           metric_key_sql_df_temp_nonconversion.loc[row,kpi_col],                                                      
+                                                                            metric_key_sql_df_temp_nonconversion.loc[row,'user_cnt'])
 
 
             if c.closed:
@@ -1634,7 +1663,8 @@ def run_mta_multi(
                                                 ranked_dims_str,
                                                 kpi_col,
                                                 user_seg_col,
-                                                user_seg )
+                                                user_seg,
+                                                mta_partial_seg)
             
             if c.closed:
                 conn = psycopg2.connect(conn_string)
