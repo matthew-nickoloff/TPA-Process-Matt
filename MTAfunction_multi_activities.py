@@ -818,7 +818,7 @@ def model_iteration(tokenized_table_name,
     start_time = time.clock()
     model_data_all_users = model_data.append(
         non_conversion_model_data).fillna(value=0)
-    logitbenchmark = linear_model.LogisticRegression(C=1.0)
+    logitbenchmark = linear_model.LogisticRegression(C=1.0, solver='liblinear', max_iter=200)
     m = model_data_all_users.shape[1]
 
     # logitbenchmark.fit(
@@ -854,7 +854,7 @@ def model_iteration(tokenized_table_name,
     model_potential_data=non_conversion_model_data.loc[~non_conversion_model_data.index.isin(similar_non_converted_index)].reset_index(drop=True)  
 
     logit = {}
-    logit['1'] = linear_model.LogisticRegression(C=1.0)
+    logit['1'] = linear_model.LogisticRegression(C=1.0, solver='liblinear', max_iter=200)
     X_Y_model_data = {}
     X_Y_model_data['1'] = model_data.append(
         similar_non_converted).fillna(value=0)
@@ -904,7 +904,7 @@ def model_iteration(tokenized_table_name,
                                                               ][new_pred[str(i)] >= z].reset_index(drop=True)
         X_Y_model_data[str(i + 1)] = X_Y_model_data[str(i)
                                                     ].append(new_XY_to_add[str(i)]).fillna(value=0)
-        logit[str(i + 1)] = linear_model.LogisticRegression(C=1.0)
+        logit[str(i + 1)] = linear_model.LogisticRegression(C=1.0, solver='liblinear', max_iter=200)
 
         # logit[str(i + 1)].fit(X_Y_model_data[str(i + 1)].iloc[:, 1:m - 1],
         #                       np.ravel(X_Y_model_data[str(i + 1)].iloc[:, -1]))
@@ -1264,10 +1264,8 @@ def decomp(
     standard = np.matrix(average_imp).transpose()
     intercept = np.matrix(best_model.intercept_, dtype=np.float64)
     coefs = np.matrix(best_model.coef_, dtype=np.float64)
-    preds_avg_imp_wo_single_metric = np.exp(intercept + np.dot(coefs, average_imp_matrix)) / (
-        1 + np.exp(intercept + np.dot(coefs, average_imp_matrix)))
-    preds_avg_imp = np.exp(intercept + np.dot(coefs, standard)) / \
-        (1 + np.exp(intercept + np.dot(coefs, standard)))
+    preds_avg_imp_wo_single_metric = 1 / (1 + np.exp(-(intercept + np.dot(coefs, average_imp_matrix))))
+    preds_avg_imp = 1 / (1 + np.exp(-(intercept + np.dot(coefs, standard))))
 
     decomp1['preds_avg_imp'] = float(preds_avg_imp)
     decomp1['preds_avg_imp_wo_single_metric'] = preds_avg_imp_wo_single_metric.transpose()
@@ -1294,12 +1292,11 @@ def decomp(
     decomp2['seen_users_sums_best'] = seen_users_sums_best
     decomp2['converted_users'] = converted_users
 
-    preds_intercept_only = np.exp(intercept) / (1 + np.exp(intercept))
+    preds_intercept_only = 1 / (1 + np.exp(-intercept))
     single_metric_matrix = np.matlib.zeros(
         (average_imp_matrix.shape[0], average_imp_matrix.shape[1]))
     np.fill_diagonal(single_metric_matrix, average_imp)
-    preds_one_metric_with_intercept = np.exp(intercept + np.dot(coefs, single_metric_matrix)) / (
-        1 + np.exp(intercept + np.dot(coefs, single_metric_matrix)))
+    preds_one_metric_with_intercept = 1 / (1 + np.exp(-(intercept + np.dot(coefs, single_metric_matrix))))
     decomp2['preds_intercept_only'] = float(preds_intercept_only)
     decomp2['preds_one_metric_with_intercept'] = preds_one_metric_with_intercept.transpose()
     decomp2['incrementality_forward'] = decomp2['preds_one_metric_with_intercept'] - \
