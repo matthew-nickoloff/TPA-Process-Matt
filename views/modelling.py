@@ -101,15 +101,15 @@ layout = [
                                             dbc.RadioItems(
                                                 id="use_user_info",
                                                 options=[
-                                                    {'label':'Y','value':1},
-                                                    {'label':'N','value':2}],
+                                                    {'label': 'Y', 'value': 1},
+                                                    {'label': 'N', 'value': 2}],
                                                 value=2,
                                                 inline=True
                                             )],
                                             width=4,
                                             style={'text-align': 'right'}
                                         ),
-                                    ], row=True, style={'margin-bottom':'0px'}),
+                                    ], row=True, style={'margin-bottom': '0px'}),
 
                                     dbc.FormGroup(
                                         id="user_seg_formgroup",

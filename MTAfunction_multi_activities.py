@@ -8,7 +8,6 @@ from sklearn import linear_model
 from time import gmtime, strftime
 import sys
 import time
-from scipy.optimize import curve_fit
 import time
 import xlsxwriter
 import functools as ft
@@ -17,10 +16,10 @@ import boto3
 import logging
 import traceback
 from config import aws_credentials
-
 import os
 os.environ['NUMEXPR_MAX_THREADS'] = '15'
 os.environ['NUMEXPR_NUM_THREADS'] = '12'
+
 import numexpr as ne
 
 
@@ -114,6 +113,7 @@ def check_table_existance(conn_string,
 # find metric keys that have conversions 
 def available_mkey(conn_string,
                     tactic_id,
+                    tactic_name,
                     tokenized_table_name,
                     ranked_dims_mkey,
                     ranked_dims_str,
@@ -219,7 +219,8 @@ def available_mkey(conn_string,
 #         print('conversion_need_sampling')    
 #         print(conversion_need_sampling)
 
-        logging.info("> Check sampling needs used {} secs!".format(int(time.clock() - start_time_check_sampling_need)))  
+        logging.info("> Activity: {} - Checking sampling needs used {} secs!".format(
+            tactic_name, int(time.clock() - start_time_check_sampling_need)))
 
 
 
@@ -306,7 +307,8 @@ def available_mkey(conn_string,
 
 
 
-            logging.info("> Creating user subset used {} secs!".format(int(time.clock() - start_time_handle_size)))        
+            logging.info("> Activity: {} - Creating user subset used {} secs!".format(
+                tactic_name, int(time.clock() - start_time_handle_size)))
 
             c.close()
             conn.close()
@@ -1590,7 +1592,29 @@ def run_mta_multi(
     directory,
     use_user_info,
     mta_partial_seg,
-    timediscount ):
+    timediscount
+):
+
+    """
+
+    :param conn_string: Redshift connection string
+    :param tokenized_table_name: user-provided tokenized table
+    :param metric_key_explanation_table: user-provided metric mapping table
+    :param dimension_ranking_table: user-provided tactic mapping table
+    :param kpi_col: user-provided name of KPI column. e.g. cm1
+    :param user_seg_col: if use_user_info is 2 (default), user_seg_col would be 1; if use_user_info is 1,
+                        user_seg_col would be user segment column name. e.g. s1
+    :param directory: S3 directory path
+    :param use_user_info: if 1, use user segment info; if 2 (default), do not use user segment info
+    :param mta_partial_seg: if [1], running TPA using each segment of converted users against all non-converted users;
+                            otherwise, if not [1] and non_conversion_model_data has 0 rows, mta_partial_seg_flag would
+                            be 1 and current tactic would be skipped
+    :param timediscount: 1 or 0.
+    :return:
+    """
+
+
+
 
     kpi_col = kpi_col.strip(" ")
 
@@ -1612,7 +1636,7 @@ def run_mta_multi(
                 where userid in
                 (select distinct userid
                 from %s
-                where %s = 1);''' % (tokenized_table_name,kpi_col,tokenized_table_name,kpi_col))
+                where %s = 1);''' % (tokenized_table_name, kpi_col, tokenized_table_name, kpi_col))
     
     # multiple KPI
     # map converted users using userid but do not delete rows where metric_key is null
@@ -1623,119 +1647,153 @@ def run_mta_multi(
 
     # c.execute(
     #     '''delete from %s where metric_key is null;''' %
-    #     (tokenized_table_name) )    # need to check with CET on their final version sql code. They may set it to 0_0_0_0... for conversions.
+    #     (tokenized_table_name) )    # need to check with CET on their final version sql code.
+    #     They may set it to 0_0_0_0... for conversions.
     conn.commit()
 
 
     # read in rank order table
-    rankorder = pd.read_sql("select * from %s;" % dimension_ranking_table,conn)
+    rankorder = pd.read_sql("select * from %s;" % dimension_ranking_table, conn)
     tactic_ids = rankorder["tactic_id"].drop_duplicates().tolist()
 
 
     # read in the first row of tokenized table
     if user_seg_col == 1:
-        user_segs=[1]
+        user_segs = [1]
     else:
-        user_seg_col=user_seg_col.strip(' ')
-        user_segs=pd.read_sql("select distinct %s from %s where %s is not null;" %(user_seg_col,tokenized_table_name,
-                                                                                    user_seg_col),conn)[user_seg_col].unique().tolist()   # make sure unique user segments don't contain NA
+        user_seg_col = user_seg_col.strip(' ')
+        # make sure unique user segments don't contain NA
+        user_segs = pd.read_sql("select distinct %s from %s where %s is not null;" % (
+            user_seg_col, tokenized_table_name, user_seg_col), conn)[user_seg_col].unique().tolist()
+
 
     # output filename indicates tokenized table name and kpi column name
-    output_excel_path = "%s" % tokenized_table_name + '_' + kpi_col + '_' + strftime("%Y-%m-%d", gmtime() ) + '_' + str(int(time.time())) + '.xlsx'
+    output_excel_path = "%s" % tokenized_table_name + '_' + kpi_col + '_' + \
+                        strftime("%Y-%m-%d", gmtime()) + '_' + str(int(time.time())) + '.xlsx'
     appended_df = []
 
-    print(user_seg_col,user_segs,mta_partial_seg)
+
+    print(user_seg_col, user_segs, mta_partial_seg)
+
 
     for tactic_id in tactic_ids:
         for user_seg in user_segs:
 
-            ranked_dims = rankorder.loc[(rankorder["tactic_id"]==tactic_id)].sort_values('rankorder',ascending=True)["metric_id"].tolist()
+            ranked_dims = rankorder.loc[
+                rankorder["tactic_id"] == tactic_id].sort_values("rankorder", ascending=True)["metric_id"].tolist()
             ranked_dims_str = ', '.join(ranked_dims)
             ranked_dims_mkey = " || '_' || ".join(ranked_dims)
 
-            metric_key_sql_df,user_subset_table = available_mkey(conn_string,
-                                                tactic_id,
-                                                tokenized_table_name,
-                                                ranked_dims_mkey,
-                                                ranked_dims_str,
-                                                kpi_col,
-                                                user_seg_col,
-                                                user_seg,
-                                                mta_partial_seg)
-            
+            tactic_name = rankorder.loc[rankorder.tactic_id == tactic_id, "tactic"].values[0]
+
+            try:
+                metric_key_sql_df, user_subset_table = available_mkey(
+                    conn_string,
+                    tactic_id,
+                    tactic_name,
+                    tokenized_table_name,
+                    ranked_dims_mkey,
+                    ranked_dims_str,
+                    kpi_col,
+                    user_seg_col,
+                    user_seg,
+                    mta_partial_seg)
+
+            except Exception as e:
+                logging.info(
+                    "> Activity: {} - Sampling users and creating user subsets reference table failed!".format(
+                        tactic_name
+                    ))
+                logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
+                continue
+
+
             if c.closed:
                 conn = psycopg2.connect(conn_string)
                 c = conn.cursor()
 
-            mkey_explanation = pd.read_sql(
-                "select distinct * from %s where metric_id='m0';" % (metric_key_explanation_table), conn)
+
 
             # if filtered segment has conversions
-            if metric_key_sql_df.shape[0] == 0 and use_user_info==1:
-                logging.info("> Activity: {} + User Segment: {} don't have conversions.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0], str(user_seg) ))
+            if metric_key_sql_df.shape[0] == 0 and use_user_info == 1:
+                logging.info("> Activity: {} + User Segment: {} don't have conversions.".format(
+                    tactic_name, str(user_seg)))
                 continue
-            elif metric_key_sql_df.shape[0] != 0 and use_user_info==1:
-                logging.info("> Jump into Activity: {} + User Segment: {}.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id), "dimension_name"].values[0],
-                                                                                    str(user_seg) ) )
-            elif metric_key_sql_df.shape[0] == 0 and use_user_info==2:
-                logging.info("> Activity: {} doesn't have conversions.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0] ))
+
+            elif metric_key_sql_df.shape[0] != 0 and use_user_info == 1:
+                logging.info("> Jump into Activity: {} + User Segment: {}.".format(tactic_name, str(user_seg)))
+
+            elif metric_key_sql_df.shape[0] == 0 and use_user_info == 2:
+                logging.info("> Activity: {} doesn't have conversions.".format(tactic_name))
                 continue
-            elif metric_key_sql_df.shape[0] != 0 and use_user_info==2:
-                logging.info("> Jump into Activity: {}.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id), "dimension_name"].values[0] ) )
+
+            elif metric_key_sql_df.shape[0] != 0 and use_user_info == 2:
+                logging.info("> Jump into Activity: {}.".format(tactic_name))
 
 
 
             try:
-                model_data, non_conversion_model_data,conversion_metric_averages, last_click, tokenized_cols, mta_partial_seg_flag = database_data_processing(
-                    metric_key_sql_df,
-                    ranked_dims_mkey,
-                    ranked_dims_str,
-                    kpi_col,
-                    tactic_id,
-                    user_seg_col,
-                    user_seg,
-                    mta_partial_seg,
-                    conn_string,
-                    tokenized_table_name,
-                    sample_user_tablename=user_subset_table,
-                    timediscount=1 )
-                
-                if mta_partial_seg_flag==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There are 0 rows in nonconversion data. If you only have user segment info for converted users, remember to check\
-                                the box and run MTA with each converted segment against all non-converted users at your own risk!!")
+                model_data, non_conversion_model_data, conversion_metric_averages, last_click, tokenized_cols, \
+                    mta_partial_seg_flag = database_data_processing(
+                        metric_key_sql_df,
+                        ranked_dims_mkey,
+                        ranked_dims_str,
+                        kpi_col,
+                        tactic_id,
+                        user_seg_col,
+                        user_seg,
+                        mta_partial_seg,
+                        conn_string,
+                        tokenized_table_name,
+                        sample_user_tablename=user_subset_table,
+                        timediscount=timediscount)
+
+                if mta_partial_seg_flag == 1:
+                    logging.info(
+                        "> Activity: {} + User Segment: {} --> There are 0 rows in nonconversion data. ".format(
+                            tactic_name, str(user_seg)
+                        ) + "If you only have user segment info for converted users, remember to check the box " +
+                        "and run TPA with each converted segment against all non-converted users at your own risk!!")
                     continue
 
             except Exception as e:
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> There is probably something wrong with data loading/cleaning process!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0] ) )
-                    # logging.info("> {}: {}".format(sys.exc_info()[0], str(e)))                            
-                    logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             # detailed traceback
+
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> ".format(tactic_name) +
+                                 "There is probably something wrong with data loading/cleaning process!")
+                    logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There is probably something wrong with data loading/cleaning process!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                                                    str(user_seg) ) )
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> ".format(tactic_name, str(user_seg)) +
+                                 "There is probably something wrong with data loading/cleaning process!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             
                     continue
                 
 
             try:
-                best_model_data, best_mkey_lookup_all, best_model,level, valid_num_iteration, best_mode_validation_metric = model_iteration(
-                    tokenized_table_name,
-                    tactic_id,
-                    ranked_dims,
-                    conversion_metric_averages,
-                    model_data,
-                    non_conversion_model_data,
-                    num_iterations=3, # no need to show on MTA UI
-                    quant=0.3 )
+                best_model_data, best_mkey_lookup_all, best_model, level, valid_num_iteration, \
+                    best_mode_validation_metric = model_iteration(
+                        tokenized_table_name,
+                        tactic_id,
+                        ranked_dims,
+                        conversion_metric_averages,
+                        model_data,
+                        non_conversion_model_data,
+                        num_iterations=3,
+                        quant=0.3)
+
             except Exception as e:
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> There is probably something wrong with model running process!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0] ) )
+
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> ".format(tactic_name) +
+                                 "There is probably something wrong with model running process!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             
                     continue
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There is probably something wrong with model running process!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                                            str(user_seg) ) )
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> ".format(tactic_name, str(user_seg)) +
+                                 "There is probably something wrong with model running process!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             
                     continue
 
@@ -1758,19 +1816,23 @@ def run_mta_multi(
                     spend=1,
                     margin=1)
                 
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> Decomp table is generated.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0] ) )
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> Decomp table is generated.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0], str(user_seg) ) )
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> Decomp table is generated.".format(tactic_name))
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> Decomp table is generated.".format(
+                        tactic_name, str(user_seg)))
             
             except Exception as e:
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> There is probably something wrong with decomp calculation!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0]))
+
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> ".format(tactic_name) +
+                                 "There is probably something wrong with decomp calculation!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There is probably something wrong with decomp calculation!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                                            str(user_seg) ) )
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> ".format(tactic_name, str(user_seg)) +
+                                 "There is probably something wrong with decomp calculation!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
 
@@ -1788,19 +1850,24 @@ def run_mta_multi(
                     appended_df
                     # level
                 )
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> Mix Master has been generated!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0]))
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> Mix Master has been generated!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                str(user_seg) ) )
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> Mix Master has been generated!".format(tactic_name))
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> Mix Master has been generated!".format(
+                        tactic_name, str(user_seg)))
+
             except Exception as e:
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> There is probably something wrong with mix master calculation!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0]))
+
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> ".format(tactic_name) +
+                                 "There is probably something wrong with mix master calculation!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There is probably something wrong with mix master calculation!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                                                str(user_seg) ) )
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> ".format(tactic_name, str(user_seg)) +
+                                 "There is probably something wrong with mix master calculation!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
     
@@ -1809,13 +1876,13 @@ def run_mta_multi(
     # concatenate mix master from different tactics
     try:
         appended_df_full = pd.concat(mix_master)
-        writer = pd.ExcelWriter(output_excel_path, engine='xlsxwriter' )
-        appended_df_full.to_excel(writer, sheet_name='Decomp Info', index=False )
+        writer = pd.ExcelWriter(output_excel_path, engine='xlsxwriter')
+        appended_df_full.to_excel(writer, sheet_name='Decomp Info', index=False)
         writer.save()
+
     except Exception as e:
         logging.info("> There is probably something wrong with concatenating decomp from tactic(s)!")
-        # logging.info("> {}: {}".format(sys.exc_info()[0], str(e)))
-        logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             # detailed traceback
+        logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
 
     try:
         upload_to_s3(
@@ -1824,9 +1891,10 @@ def run_mta_multi(
             destination=directory+output_excel_path,
             aws_access_key_id=aws_credentials['aws_access_key_id'],
             aws_secret_access_key=aws_credentials['aws_secret_access_key'])
-        logging.info("> Full Mix Master file {} is now in S3://analytic-partners/{}!".format(output_excel_path,directory) )
+        logging.info("> Full Mix Master file {} is now in S3://analytic-partners/{}!".format(
+            output_excel_path,directory))
+
     except Exception as e:
         logging.info("> There is probably something wrong with outputing mix master to S3!")
-        # logging.info("> {}: {}".format(sys.exc_info()[0], str(e)))
-        logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             # detailed traceback
+        logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
 
