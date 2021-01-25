@@ -171,8 +171,11 @@ def available_mkey(conn_string,
                                     user_seg 
                                     
                                     ), conn)
- 
-    
+
+    if len(metric_key_sql_df) > 150:
+        subset_threhold = 1000
+
+    logging.error("> Activity: {} - subset_threhold {}".format(tactic_name, subset_threhold))
     logging.error("> Number of metric_keys that with conversions: {}".format(len(metric_key_sql_df)) )
 #     logging.info("> Old Handling data size used {} secs!".format(int(time.clock() - start_time_handle_size_old)))  
 
