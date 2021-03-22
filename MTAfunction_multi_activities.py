@@ -8,7 +8,6 @@ from sklearn import linear_model
 from time import gmtime, strftime
 import sys
 import time
-from scipy.optimize import curve_fit
 import time
 import xlsxwriter
 import functools as ft
@@ -17,6 +16,11 @@ import boto3
 import logging
 import traceback
 from config import aws_credentials
+import os
+os.environ['NUMEXPR_MAX_THREADS'] = '15'
+os.environ['NUMEXPR_NUM_THREADS'] = '12'
+
+import numexpr as ne
 
 
 def check_table_existance(conn_string,
@@ -109,12 +113,21 @@ def check_table_existance(conn_string,
 # find metric keys that have conversions 
 def available_mkey(conn_string,
                     tactic_id,
+                    tactic_name,
                     tokenized_table_name,
                     ranked_dims_mkey,
                     ranked_dims_str,
                     kpi_col,
                     user_seg_col,
-                    user_seg
+                    user_seg,
+                   mta_partial_seg,
+                    subset_threhold=10000,
+                   total_user_threhold=100000,#if unique user count goes above this number then usersubset will be created
+#                     total_conversion_threhold=50000,
+#                    total_nonconversion_threhold=150000,
+                   
+
+                   
                 ):
 
     conn = psycopg2.connect(conn_string)
@@ -124,26 +137,203 @@ def available_mkey(conn_string,
     # However, since we don't do delete in multiple KPI case, double check to make sure "null" does not exist in metric_key
     # "and m0!=0???" --- m0 indicates converted users whose metric_key is very likely to be null instead of 0_0_0_0_0_......
 
-    metric_key_sql_df = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and %s=%s)
+#     start_time_handle_size_old = time.clock()
+#     metric_key_sql_df = pd.read_sql('''with tokenized_slice as
+#         (select %s as metric_key, 
+        
+#         %s=1 from %s where m0=%s and %s=%s)
 
-        select distinct metric_key 
-        from tokenized_slice
-        where %s=1 and metric_key is not null
+#         select distinct metric_key 
+#         from tokenized_slice
+#         where metric_key is not null
+#         order by metric_key;''' % (ranked_dims_mkey,
+# #                                     ranked_dims_str,
+#                                     kpi_col,
+#                                     tokenized_table_name,
+#                                     tactic_id,
+#                                     user_seg_col,
+#                                     user_seg 
+                                    
+#                                     ), conn)
+    
+    metric_key_sql_df = pd.read_sql('''
+
+        select distinct  %s as metric_key
+        from %s
+        where %s=1 and m0=%s and %s=%s and metric_key is not null
         order by metric_key;''' % (ranked_dims_mkey,
-                                    ranked_dims_str,
-                                    kpi_col,
+#                                     ranked_dims_str,
+#                                     
                                     tokenized_table_name,
+                                   kpi_col,
                                     tactic_id,
                                     user_seg_col,
-                                    user_seg, 
-                                    kpi_col
+                                    user_seg 
+                                    
                                     ), conn)
 
+    if len(metric_key_sql_df) > 150:
+        subset_threhold = 1000
+
+    logging.error("> Activity: {} - subset_threhold {}".format(tactic_name, subset_threhold))
+    logging.error("> Number of metric_keys that with conversions: {}".format(len(metric_key_sql_df)) )
+#     logging.info("> Old Handling data size used {} secs!".format(int(time.clock() - start_time_handle_size_old)))  
+
+    
+    if len(metric_key_sql_df)>0:
+        # check if need sub-sampling on userid
+        start_time_check_sampling_need = time.clock()
+        if mta_partial_seg!=[1]:
+            user_count_df = pd.read_sql('''select count(distinct userid) as user_cnt 
+                                              from %s where m0=%s and %s=%s 
+                                              ;''' % ( tokenized_table_name,
+                                                        tactic_id,
+                                                        user_seg_col,
+                                                        user_seg
+                                                        ), conn)
+        else:
+        
+            user_count_df = pd.read_sql('''select sum(user_cnt) as user_cnt 
+                                              from 
+                                              (select count(distinct userid) as user_cnt from %s where %s=1 and m0=%s and %s=%s) 
+                                              union
+                                               (select count(distinct userid) as user_cnt from %s where %s=0 and m0=%s)
+                                              ;''' % ( 
+                                                                    tokenized_table_name,
+                                                                    kpi_col,
+                                                                    tactic_id,
+                                                                    user_seg_col,
+                                                                    user_seg,
+                                                                    tokenized_table_name,
+                                                                    kpi_col,
+                                                                    tactic_id                                                                   
+                                                                    
+                                                                    ), conn)
+    #     select m0,cm1,count(distinct userid) from tokenized_test_data group by m0,cm1 order by m0,cm1; --9.25s
+
+        logging.error("> Total number of unique users: {}".format(str(user_count_df['user_cnt'][0])) )
+        
+        if user_count_df['user_cnt'][0]>total_user_threhold:
+            need_sampling=True
+        else:
+            need_sampling=False
+#         conversion_need_sampling=user_count_df.loc[user_count_df[kpi_col]==1,'user_cnt'].values[0]>total_conversion_threhold
+#         nonconversion_need_sampling=user_count_df.loc[user_count_df[kpi_col]==0,'user_cnt'].values[0]>total_nonconversion_threhold
+#         print('conversion_need_sampling')    
+#         print(conversion_need_sampling)
+
+        logging.info("> Activity: {} - Checking sampling needs used {} secs!".format(
+            tactic_name, int(time.clock() - start_time_check_sampling_need)))
+
+
+
+    
+        if need_sampling:#conversion_need_sampling or nonconversion_need_sampling: #and
+            start_time_handle_size = time.clock()
+
+            metric_key_sql_df_temp = pd.read_sql('''with tokenized_slice as
+                (select userid, %s, %s from %s where m0=%s and %s=%s)
+                select count(distinct userid) as user_cnt,%s,%s as metric_key,%s 
+                from tokenized_slice
+
+                group by %s,%s , metric_key
+                order by %s,%s;''' % (ranked_dims_str,
+
+                                            kpi_col,
+                                            tokenized_table_name,
+                                            tactic_id,
+                                            user_seg_col,
+                                            user_seg, 
+                                           ranked_dims_str,
+                                      ranked_dims_mkey,
+                                            kpi_col,
+                                           ranked_dims_str,
+                                            kpi_col,
+                                       ranked_dims_str,
+                                            kpi_col
+                                            ), conn)# metric_key not in lists will have '0_0_..._0'?
+
+
+            metric_key_list_with_conversion=metric_key_sql_df_temp.loc[(metric_key_sql_df_temp[kpi_col]==1)\
+                                                                       &(metric_key_sql_df_temp['user_cnt']>0),'metric_key']                       
+            # set user cap for conversion and non-conversion to x per metric key
+            
+            metric_key_sql_df_temp=metric_key_sql_df_temp.merge(metric_key_list_with_conversion,on='metric_key')
+            metric_key_sql_df_temp.loc[metric_key_sql_df_temp.user_cnt>subset_threhold, 'user_cnt']=subset_threhold
+
+            string_test='create table user_sub_temp_{} as select * from '.format(tactic_id)
+            
+ 
+            if mta_partial_seg!=[1]:
+                nonconversion_string=' and {} = {} '.format(user_seg_col,user_seg)
+            else:
+                nonconversion_string=''
+                
+            metric_key_sql_df_temp_conversion=metric_key_sql_df_temp[metric_key_sql_df_temp[kpi_col]==1].reset_index(drop=True)
+            metric_key_sql_df_temp_nonconversion=metric_key_sql_df_temp[metric_key_sql_df_temp[kpi_col]==0].reset_index(drop=True)
+            
+            
+            for row in range(len(metric_key_sql_df_temp_conversion)):
+                string_test=string_test+' (select distinct userid from {} where m0={} and {}={} '.format(tokenized_table_name,
+                                                                                                         tactic_id,
+                                                                                                         user_seg_col,
+                                                                                                         user_seg,)
+                for col in metric_key_sql_df_temp_conversion.columns[1:-2]:
+                    string_test=string_test+' and {}={}'.format(col,metric_key_sql_df_temp_conversion.loc[row,col] )
+                string_test=string_test+' and {}={} limit {}) union'.format(kpi_col,
+                                                                           metric_key_sql_df_temp_conversion.loc[row,kpi_col],                                                      
+                                                                            metric_key_sql_df_temp_conversion.loc[row,'user_cnt'])
+            
+            
+            for row in range(len(metric_key_sql_df_temp_nonconversion)):
+                string_test=string_test+' (select distinct userid from {} where m0={} {} '.format(tokenized_table_name,
+                                                                                                         tactic_id,
+                                                                                                         nonconversion_string)
+                for col in metric_key_sql_df_temp_nonconversion.columns[1:-2]:
+                    string_test=string_test+' and {}={}'.format(col,metric_key_sql_df_temp_nonconversion.loc[row,col] )
+                string_test=string_test+' and {}={} limit {}) union'.format(kpi_col,
+                                                                           metric_key_sql_df_temp_nonconversion.loc[row,kpi_col],                                                      
+                                                                            metric_key_sql_df_temp_nonconversion.loc[row,'user_cnt'])
+
+
+            if c.closed:
+                conn=psycopg2.connect(conn_string)
+                c=conn.cursor()
+
+            c.execute('drop table if exists user_sub_temp_{}'.format(tactic_id))
+
+    #         print(string_test[:-5])
+            start_time_query1 = time.clock()
+            c.execute(string_test[:-5] )
+
+            conn.commit()
+
+
+
+            logging.info("> Activity: {} - Creating user subset used {} secs!".format(
+                tactic_name, int(time.clock() - start_time_handle_size)))
+
+            c.close()
+            conn.close()
+
+
+
+
+            return metric_key_sql_df, 'user_sub_temp_{}'.format(tactic_id)
+
+
+    
+    
+    
+    
+    
     c.close()
     conn.close()
+    
 
-    return metric_key_sql_df
+    
+
+    return metric_key_sql_df,''
 
 
 
@@ -189,7 +379,8 @@ def check_user_seg_col_existance(conn_string,tokenized_table_name,user_segment_c
 
 
 
-def database_data_processing(metric_key_sql_df,
+def database_data_processing(
+                             metric_key_sql_df,
                             ranked_dims_mkey,
                             ranked_dims_str,
                             kpi_col,
@@ -199,8 +390,10 @@ def database_data_processing(metric_key_sql_df,
                             mta_partial_seg,
                             conn_string,                            
                             tokenized_table_name,
-                            timediscount ):
-
+                            sample_user_tablename,
+                            timediscount,
+                            ):
+#     user_subset_table='user_sub_temp_{}'.format(tactic_id)
     start_time = time.clock()
     conn = psycopg2.connect(conn_string)
     c = conn.cursor()
@@ -248,11 +441,27 @@ def database_data_processing(metric_key_sql_df,
         metric_key_sql_string5 = metric_key_sql_string5 + \
             "," + metric_key_sql_df['processed_column5'][i]
 
-    
+#     sample_size_conversion=10000
     # conversion data
+    if len(sample_user_tablename)>0:
+        usersub_string=' and userid in (select userid from {})'.format(sample_user_tablename)
+        nonconversion_string=' and userid in (select userid from {})'.format(sample_user_tablename)
+    else:
+        usersub_string=' and {} = {} '.format(user_seg_col,
+                                              user_seg)
+        if mta_partial_seg!=[1]:
+            nonconversion_string=' and {} = {} '.format(user_seg_col,user_seg)
+        else:
+            nonconversion_string=''
+        
     if timediscount == 1:
         model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null and %s=%s),
+                                        (select userid, vtimestamp, %s as metric_key,
+                                       
+                                        %s 
+                                        from %s 
+                                        where m0=%s  
+                                        %s and metric_key is not null),
         
         table1 as
             (select userid, vtimestamp as conversion_date from
@@ -274,23 +483,28 @@ def database_data_processing(metric_key_sql_df,
                 group by userid,metric_key ) a )
             group by userid)
 
-        select %s,%s from model_data_mta;''' % (ranked_dims_mkey,
-                                            ranked_dims_str,
+        select %s,%s from model_data_mta
+       
+        ;''' % (ranked_dims_mkey,
+                                          #  ranked_dims_str,
                                             kpi_col,
                                             tokenized_table_name,
                                             tactic_id,
-                                            user_seg_col,
-                                            user_seg,
+#                                             user_seg_col,
+#                                             user_seg,
+                                            usersub_string,
                                             kpi_col,
                                             metric_key_sql_string2,
                                             kpi_col,
                                             metric_key_sql_string,
                                             kpi_col,
                                             metric_key_sql_string5,
-                                            kpi_col ), conn, chunksize=5000)
+                                            kpi_col), conn, chunksize=5000)
     else:
+       
+        
         model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null and %s=%s),
+        (select userid,  %s as metric_key from %s where m0=%s %s and %s=1 and metric_key is not null),
         
         model_data_mta as
             (select userid,
@@ -302,27 +516,30 @@ def database_data_processing(metric_key_sql_df,
                             metric_key,
                             count(*) as sum_test
                             from tokenized_slice t
-                            where t.%s=1
+                            
                             group by userid,metric_key) a
                     ) group by userid)
                             
-        select %s, %s from model_data_mta;''' % (ranked_dims_mkey,
-                                            ranked_dims_str,
-                                            kpi_col,
+        select %s, %s from model_data_mta
+       ;''' % (ranked_dims_mkey,
+#                                             ranked_dims_str,
+                                            
                                             tokenized_table_name,
                                             tactic_id,
-                                            user_seg_col,
-                                            user_seg,
+#                                             user_seg_col,
+#                                             user_seg,
+                                            usersub_string,
+                                          kpi_col,
                                             metric_key_sql_string2,
                                             kpi_col,
                                             metric_key_sql_string,
-                                            kpi_col,
+                                            
                                             metric_key_sql_string5,
-                                            kpi_col ), conn, chunksize=5000)
+                                            kpi_col), conn, chunksize=5000)
     model_data = pd.concat(model_data).reset_index(drop=True)
- 
+    print('conversion user count',str(len(model_data)))
     conversion_metric_averages = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null and %s=%s),
+        (select userid, %s as metric_key from %s where %s=1 and m0=%s  %s and metric_key is not null),
 
         model_data_mta as
             (select userid,
@@ -334,22 +551,24 @@ def database_data_processing(metric_key_sql_df,
                         metric_key,
                         count(*) as sum_test
                         from tokenized_slice t
-                        where t.%s=1
+                       
                         group by userid,metric_key) a
                 ) group by userid)
         
         select %s from model_data_mta;''' % (
                             ranked_dims_mkey,
-                            ranked_dims_str,
-                            kpi_col,
+#                             ranked_dims_str,
+#                            
                             tokenized_table_name,
+                            kpi_col,
                             tactic_id,
-                            user_seg_col,
-                            user_seg,
+#                             user_seg_col,
+#                             user_seg,
+                            usersub_string,
                             metric_key_sql_string2,
                             kpi_col,
                             metric_key_sql_string,
-                            kpi_col,
+#                             kpi_col,
                             metric_key_sql_string3), conn)
 
     conversion_metric_averages = conversion_metric_averages.iloc[0, :]
@@ -358,13 +577,13 @@ def database_data_processing(metric_key_sql_df,
         conn = psycopg2.connect(conn_string)
         c = conn.cursor()
     
-    sample_size=len(model_data)*100
+#     sample_size=len(model_data)*100
  
 
     # non-conversion data
-    if timediscount == 1 and mta_partial_seg==[1]:          # run MTA wth partial user segment info
+    if timediscount == 1:          # run MTA wth partial user segment info
         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null),
+        (select userid, vtimestamp, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
 
         table1 as
             (select userid, vtimestamp as conversion_date from
@@ -389,12 +608,12 @@ def database_data_processing(metric_key_sql_df,
                     group by userid)
 
         select %s, %s from non_conversion_model_data_mta
-        order by random()
-        limit %s;''' % (ranked_dims_mkey,
-                        ranked_dims_str,
+        ;''' % (ranked_dims_mkey,
+#                         ranked_dims_str,
                         kpi_col,
                         tokenized_table_name,
                         tactic_id,
+                        nonconversion_string,
                         kpi_col,
                         metric_key_sql_string2,
                         kpi_col,
@@ -402,57 +621,55 @@ def database_data_processing(metric_key_sql_df,
                         kpi_col,
                         kpi_col,
                         metric_key_sql_string5,
-                        kpi_col,
-                        sample_size), conn, chunksize=5000)
+                        kpi_col), conn, chunksize=5000)
 
-    elif timediscount == 1 and mta_partial_seg!=[1]:            # run MTA with fully available user segment info or not using user segment info
-        non_conversion_model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null and %s=%s),
+#     elif timediscount == 1 and mta_partial_seg!=[1]:            # run MTA with fully available user segment info or not using user segment info
+#         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
+#         (select userid, vtimestamp, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
 
-        table1 as
-            (select userid, vtimestamp as conversion_date from
-                (select *, row_number() over (partition by userid order by vtimestamp desc) as rk from tokenized_slice) where rk=1 and %s=0),
+#         table1 as
+#             (select userid, vtimestamp as conversion_date from
+#                 (select *, row_number() over (partition by userid order by vtimestamp desc) as rk from tokenized_slice) where rk=1 and %s=0),
         
-        table2 as
-            (select a.*, floor(datediff(mins,vtimestamp,conversion_date)/10080) as wk_from_conversion_weight 
-            from tokenized_slice a join table1 on a.userid=table1.userid),
+#         table2 as
+#             (select a.*, floor(datediff(mins,vtimestamp,conversion_date)/10080) as wk_from_conversion_weight 
+#             from tokenized_slice a join table1 on a.userid=table1.userid),
         
-        non_conversion_model_data_mta as
-            (select userid,%s 0 as %s
-            from
-                (select userid, %s
-                from
-                    (select userid,
-                        metric_key,
-                        sum(1/((1+0.5)^wk_from_conversion_weight)) as sum_test
-                    from table2
-                    where metric_key in (select distinct metric_key from tokenized_slice where %s=1) 
-                        and %s=0
-                    group by userid,metric_key) a )
-                    group by userid)
+#         non_conversion_model_data_mta as
+#             (select userid,%s 0 as %s
+#             from
+#                 (select userid, %s
+#                 from
+#                     (select userid,
+#                         metric_key,
+#                         sum(1/((1+0.5)^wk_from_conversion_weight)) as sum_test
+#                     from table2
+#                     where metric_key in (select distinct metric_key from tokenized_slice where %s=1) 
+#                         and %s=0
+#                     group by userid,metric_key) a )
+#                     group by userid)
 
-        select %s, %s from non_conversion_model_data_mta
-        order by random()
-        limit %s;''' % (ranked_dims_mkey,
-                        ranked_dims_str,
-                        kpi_col,
-                        tokenized_table_name,
-                        tactic_id,
-                        user_seg_col,
-                        user_seg,
-                        kpi_col,
-                        metric_key_sql_string2,
-                        kpi_col,
-                        metric_key_sql_string,
-                        kpi_col,
-                        kpi_col,
-                        metric_key_sql_string5,
-                        kpi_col,
-                        sample_size), conn, chunksize=5000)
+#         select %s, %s from non_conversion_model_data_mta
+#        ;''' % (ranked_dims_mkey,
+# #                         ranked_dims_str,
+#                         kpi_col,
+#                         tokenized_table_name,
+#                         tactic_id,
+# #                         user_seg_col,
+# #                         user_seg,
+#                         usersub_string,
+#                         kpi_col,
+#                         metric_key_sql_string2,
+#                         kpi_col,
+#                         metric_key_sql_string,
+#                         kpi_col,
+#                         kpi_col,
+#                         metric_key_sql_string5,
+#                         kpi_col), conn, chunksize=5000)
 
-    elif timediscount == 0 and mta_partial_seg==[1]:            # run MTA wth partial user segment info
+    elif timediscount == 0 :            # run MTA wth partial user segment info
         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null),
+        (select userid,  %s as metric_key, %s from %s where m0=%s  %s and metric_key is not null),
         
         non_conversion_model_data_mta as
             (select userid,
@@ -468,57 +685,56 @@ def database_data_processing(metric_key_sql_df,
             group by userid)
 
         select %s, %s from non_conversion_model_data_mta
-        order by random()
-        limit %s;''' % (ranked_dims_mkey,
-                        ranked_dims_str,
+       ;''' % (ranked_dims_mkey,
+#                         ranked_dims_str,
                         kpi_col,
                         tokenized_table_name,
                         tactic_id,
+                        nonconversion_string,
                         metric_key_sql_string2,
                         kpi_col,
                         metric_key_sql_string,
                         kpi_col,
                         kpi_col,
                         metric_key_sql_string5,
-                        kpi_col,
-                        sample_size), conn, chunksize=5000)
+                        kpi_col), conn, chunksize=5000)
     
-    elif timediscount==0 and mta_partial_seg!=[1]:          # run MTA with fully available user segment info or not using user segment info
-        non_conversion_model_data = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null and %s=%s),
+#     elif timediscount==0 and mta_partial_seg!=[1]:          # run MTA with fully available user segment info or not using user segment info
+#         non_conversion_model_data = pd.read_sql('''with tokenized_slice as
+#         (select userid, %s as metric_key,  %s from %s where m0=%s and metric_key is not null %s),
         
-        non_conversion_model_data_mta as
-            (select userid,
-            %s 0 as %s
-            from (select userid, %s from
-                (select userid,
-                        metric_key,
-                        count(*) as sum_test
-                from tokenized_slice
-                where metric_key in (select distinct metric_key from tokenized_slice where %s=1)
-                        and %s=0
-                group by userid,metric_key) a)
-            group by userid)
+#         non_conversion_model_data_mta as
+#             (select userid,
+#             %s 0 as %s
+#             from (select userid, %s from
+#                 (select userid,
+#                         metric_key,
+#                         count(*) as sum_test
+#                 from tokenized_slice
+#                 where metric_key in (select distinct metric_key from tokenized_slice where %s=1)
+#                         and %s=0
+#                 group by userid,metric_key) a)
+#             group by userid)
 
-        select %s, %s from non_conversion_model_data_mta
-        order by random()
-        limit %s;''' % (ranked_dims_mkey,
-                        ranked_dims_str,
-                        kpi_col,
-                        tokenized_table_name,
-                        tactic_id,
-                        user_seg_col,
-                        user_seg,
-                        metric_key_sql_string2,
-                        kpi_col,
-                        metric_key_sql_string,
-                        kpi_col,
-                        kpi_col,
-                        metric_key_sql_string5,
-                        kpi_col,
-                        sample_size), conn, chunksize=5000)
+#         select %s, %s from non_conversion_model_data_mta
+#       ;''' % (ranked_dims_mkey,
+# #                         ranked_dims_str,
+#                         kpi_col,
+#                         tokenized_table_name,
+#                         tactic_id,
+# #                         user_seg_col,
+# #                         user_seg,
+#                         usersub_string,
+#                         metric_key_sql_string2,
+#                         kpi_col,
+#                         metric_key_sql_string,
+#                         kpi_col,
+#                         kpi_col,
+#                         metric_key_sql_string5,
+#                         kpi_col), conn, chunksize=5000)
     non_conversion_model_data = pd.concat(non_conversion_model_data).reset_index(drop=True)
-
+    print('non-conversion user count',str(len(non_conversion_model_data)))
+#     print('non-conversion should be count',str(sample_size))
     # if user only has partial customer segment info but want to run MTA the proper way
     if mta_partial_seg!=[1] and non_conversion_model_data.shape[0]==0:
         mta_partial_seg_flag = 1
@@ -531,8 +747,9 @@ def database_data_processing(metric_key_sql_df,
 
     logging.info("> Processing and loading data used {} secs!".format(int(time.clock() - start_time)))
 
+    start_time_lastclick = time.clock()
     last_click = pd.read_sql('''with tokenized_slice as
-        (select userid, vtimestamp, %s as metric_key, %s, %s from %s where m0=%s and metric_key is not null and %s=%s),
+        (select userid, vtimestamp, %s as metric_key,  %s from %s where m0=%s and metric_key is not null and %s=%s %s),
     
         converted as
             (select * from tokenized_slice
@@ -550,14 +767,16 @@ def database_data_processing(metric_key_sql_df,
         on b.userid=a.userid and b.vtimestamp=a.max_previous
         group by metric_key
         order by metric_key;''' % (ranked_dims_mkey,
-                                    ranked_dims_str,
+#                                     ranked_dims_str,
                                     kpi_col,
                                     tokenized_table_name,
                                     tactic_id,
                                     user_seg_col,
                                     user_seg,
+                                    usersub_string,
                                     kpi_col), conn, chunksize=5000)
     last_click = pd.concat(last_click).reset_index(drop=True)
+    logging.info("> Processing and loading data for last click used {} secs!".format(int(time.clock() - start_time_lastclick)))
 
     # extract the column names (m1,m2,m3...) of raw tokenized table
     # tokenized_cols=pd.read_sql("select column_name from information_schema.columns where table_name='{}' and column_name like 'm%' and column_name not in ('m0','metric_key');".format(tokenized_table_name), conn)['column_name'].tolist()
@@ -604,7 +823,7 @@ def model_iteration(tokenized_table_name,
     start_time = time.clock()
     model_data_all_users = model_data.append(
         non_conversion_model_data).fillna(value=0)
-    logitbenchmark = linear_model.LogisticRegression(C=1.0)
+    logitbenchmark = linear_model.LogisticRegression(C=1.0, solver='liblinear', max_iter=200)
     m = model_data_all_users.shape[1]
 
     # logitbenchmark.fit(
@@ -640,7 +859,7 @@ def model_iteration(tokenized_table_name,
     model_potential_data=non_conversion_model_data.loc[~non_conversion_model_data.index.isin(similar_non_converted_index)].reset_index(drop=True)  
 
     logit = {}
-    logit['1'] = linear_model.LogisticRegression(C=1.0)
+    logit['1'] = linear_model.LogisticRegression(C=1.0, solver='liblinear', max_iter=200)
     X_Y_model_data = {}
     X_Y_model_data['1'] = model_data.append(
         similar_non_converted).fillna(value=0)
@@ -674,6 +893,11 @@ def model_iteration(tokenized_table_name,
     for i in range(1, num_iterations):
         # new_pred[str(i)] = logit[str(i)].predict_proba(
         #     X_Y_model_potential[str(i)].iloc[:, 1:m - 1])
+        if len(X_Y_model_potential[str(i)])==0:
+            logging.info("> No data meets initial condition for modeling !")
+            logging.info("> No results for this tactic !")
+            break
+            
         new_pred[str(i)] = logit[str(i)].predict_proba(
             X_Y_model_potential[str(i)].iloc[:, :m - 1])
 
@@ -685,7 +909,7 @@ def model_iteration(tokenized_table_name,
                                                               ][new_pred[str(i)] >= z].reset_index(drop=True)
         X_Y_model_data[str(i + 1)] = X_Y_model_data[str(i)
                                                     ].append(new_XY_to_add[str(i)]).fillna(value=0)
-        logit[str(i + 1)] = linear_model.LogisticRegression(C=1.0)
+        logit[str(i + 1)] = linear_model.LogisticRegression(C=1.0, solver='liblinear', max_iter=200)
 
         # logit[str(i + 1)].fit(X_Y_model_data[str(i + 1)].iloc[:, 1:m - 1],
         #                       np.ravel(X_Y_model_data[str(i + 1)].iloc[:, -1]))
@@ -881,6 +1105,8 @@ def model_iteration(tokenized_table_name,
     logging.info("> {} model iterations used {} secs!".format(
         len(logit.keys()), int(time.clock() - start_time)))
 
+    
+    start_time_savemodelinfo = time.clock()
     # Output model iteration results as backup
     total_users_by_iteration_df = pd.DataFrame(
         total_users_by_iteration).rename(columns={0: "Total_Users"})
@@ -967,7 +1193,7 @@ def model_iteration(tokenized_table_name,
     writer.save()
     best_model_vadidation_metric = performance.loc[performance.Iteration ==
                                                    best_model, 'validation_metric'].round(1)
-
+    logging.info("> Saving all model info used {} secs!".format( int(time.clock() - start_time_savemodelinfo))) 
     return X_Y_model_data[str(best_model)], mkey_lookup_all[str(best_model)], logit[str(
         best_model)], level, len(logit.keys()), best_model_vadidation_metric
         # , model_iteration_time
@@ -990,8 +1216,10 @@ def decomp(
         digital_incremental_volume,
         spend,
         margin):
-
+    
+    start_time = time.clock()
     # xy_convertion_best = best_model_data.iloc[:, 1:]
+    start_time_prepdecomp = time.clock()
     xy_convertion_best = best_model_data
 
     xy_convertion_best[xy_convertion_best > 0] = 1
@@ -1016,7 +1244,10 @@ def decomp(
 
     cols1 = list(pd.DataFrame(
         best_mkey_lookup_all).loc[:, 'metric_key': ranked_dims[level-1]]) + ['final_coef']
-
+    
+    logging.info("> Preparing data for decomp used {} secs!".format( int(time.clock() - start_time_prepdecomp))) 
+    
+#     start_time_backward = time.clock()
     decomp1 = pd.DataFrame(best_mkey_lookup_all)[cols1]
     m = best_model_data.shape[1]
 
@@ -1038,10 +1269,8 @@ def decomp(
     standard = np.matrix(average_imp).transpose()
     intercept = np.matrix(best_model.intercept_, dtype=np.float64)
     coefs = np.matrix(best_model.coef_, dtype=np.float64)
-    preds_avg_imp_wo_single_metric = np.exp(intercept + np.dot(coefs, average_imp_matrix)) / (
-        1 + np.exp(intercept + np.dot(coefs, average_imp_matrix)))
-    preds_avg_imp = np.exp(intercept + np.dot(coefs, standard)) / \
-        (1 + np.exp(intercept + np.dot(coefs, standard)))
+    preds_avg_imp_wo_single_metric = 1 / (1 + np.exp(-(intercept + np.dot(coefs, average_imp_matrix))))
+    preds_avg_imp = 1 / (1 + np.exp(-(intercept + np.dot(coefs, standard))))
 
     decomp1['preds_avg_imp'] = float(preds_avg_imp)
     decomp1['preds_avg_imp_wo_single_metric'] = preds_avg_imp_wo_single_metric.transpose()
@@ -1059,21 +1288,20 @@ def decomp(
     decomp1['ROI'] = margin * \
         decomp1['Incremental_Conversion'] / decomp1['spend']
     decomp1['methodology'] = 'Backward Decomp'
-
+#     logging.info("> Decomp - Backward used {} secs!".format( int(time.clock() - start_time_backward)))
     # Option2:forward
-
+#     start_time_forward = time.clock()
     decomp2 = pd.DataFrame(best_mkey_lookup_all)[cols1]
     decomp2['imps in the best model'] = decomp1['imps in the best model']
     decomp2['avg imps in the best model'] = decomp1['avg imps in the best model']
     decomp2['seen_users_sums_best'] = seen_users_sums_best
     decomp2['converted_users'] = converted_users
 
-    preds_intercept_only = np.exp(intercept) / (1 + np.exp(intercept))
+    preds_intercept_only = 1 / (1 + np.exp(-intercept))
     single_metric_matrix = np.matlib.zeros(
         (average_imp_matrix.shape[0], average_imp_matrix.shape[1]))
     np.fill_diagonal(single_metric_matrix, average_imp)
-    preds_one_metric_with_intercept = np.exp(intercept + np.dot(coefs, single_metric_matrix)) / (
-        1 + np.exp(intercept + np.dot(coefs, single_metric_matrix)))
+    preds_one_metric_with_intercept = 1 / (1 + np.exp(-(intercept + np.dot(coefs, single_metric_matrix))))
     decomp2['preds_intercept_only'] = float(preds_intercept_only)
     decomp2['preds_one_metric_with_intercept'] = preds_one_metric_with_intercept.transpose()
     decomp2['incrementality_forward'] = decomp2['preds_one_metric_with_intercept'] - \
@@ -1088,10 +1316,11 @@ def decomp(
     decomp2['ROI'] = margin * \
         decomp2['Incremental_Conversion'] / decomp2['spend']
     decomp2['methodology'] = 'Forward Decomp'
-
+#     logging.info("> Decomp - Forward used {} secs!".format( int(time.clock() - start_time_forward))) 
     # Op3:game theory
+    start_time_gametheory = time.clock()
     mkey_cnt = len(best_mkey_lookup_all['metric_key'])
-    if mkey_cnt <= 20:
+    if mkey_cnt <= 5:
         def ncr(n, r):
             r = min(r, n - r)
             if r == 0:
@@ -1158,6 +1387,9 @@ def decomp(
     else:
         decomp3 = pd.DataFrame()
 
+        
+    logging.info("> Decomp - Game Theory used {} secs!".format( int(time.clock() - start_time_gametheory)))    
+        
     # cols2 = list(pd.DataFrame(
     #     best_mkey_lookup_all).loc[:, 'metric_key':'m' + str(level)])
 
@@ -1186,15 +1418,9 @@ def decomp(
     cols = cols2 + ['spend'] + ['margin'] +  ['converted_users'] + \
         ['Incremental_Conversion'] + ['ROI'] + ['methodology']
 
-    # decomp_com = decomp1[cols].append(
-    #     decomp2[cols],
-    #     ignore_index=True).append(
-    #     decomp3[cols],
-    #     ignore_index=True).append(
-    #         decomp4[cols],
-    #     ignore_index=True)
 
-    if mkey_cnt <= 20:
+
+    if mkey_cnt <= 5:
         decomp_com = decomp1[cols].append(
         decomp2[cols],
         ignore_index=True).append(
@@ -1222,7 +1448,7 @@ def decomp(
         pass
     elif use_user_info==1:
         decomp_com[user_seg_col]=user_seg
-    
+    logging.info("> Decomp used {} secs!".format( int(time.clock() - start_time)))
     return decomp_com
 
 
@@ -1369,7 +1595,29 @@ def run_mta_multi(
     directory,
     use_user_info,
     mta_partial_seg,
-    timediscount ):
+    timediscount
+):
+
+    """
+
+    :param conn_string: Redshift connection string
+    :param tokenized_table_name: user-provided tokenized table
+    :param metric_key_explanation_table: user-provided metric mapping table
+    :param dimension_ranking_table: user-provided tactic mapping table
+    :param kpi_col: user-provided name of KPI column. e.g. cm1
+    :param user_seg_col: if use_user_info is 2 (default), user_seg_col would be 1; if use_user_info is 1,
+                        user_seg_col would be user segment column name. e.g. s1
+    :param directory: S3 directory path
+    :param use_user_info: if 1, use user segment info; if 2 (default), do not use user segment info
+    :param mta_partial_seg: if [1], running TPA using each segment of converted users against all non-converted users;
+                            otherwise, if not [1] and non_conversion_model_data has 0 rows, mta_partial_seg_flag would
+                            be 1 and current tactic would be skipped
+    :param timediscount: 1 or 0.
+    :return:
+    """
+
+
+
 
     kpi_col = kpi_col.strip(" ")
 
@@ -1391,7 +1639,7 @@ def run_mta_multi(
                 where userid in
                 (select distinct userid
                 from %s
-                where %s = 1);''' % (tokenized_table_name,kpi_col,tokenized_table_name,kpi_col))
+                where %s = 1);''' % (tokenized_table_name, kpi_col, tokenized_table_name, kpi_col))
     
     # multiple KPI
     # map converted users using userid but do not delete rows where metric_key is null
@@ -1402,117 +1650,153 @@ def run_mta_multi(
 
     # c.execute(
     #     '''delete from %s where metric_key is null;''' %
-    #     (tokenized_table_name) )    # need to check with CET on their final version sql code. They may set it to 0_0_0_0... for conversions.
+    #     (tokenized_table_name) )    # need to check with CET on their final version sql code.
+    #     They may set it to 0_0_0_0... for conversions.
     conn.commit()
 
 
     # read in rank order table
-    rankorder = pd.read_sql("select * from %s;" % dimension_ranking_table,conn)
+    rankorder = pd.read_sql("select * from %s;" % dimension_ranking_table, conn)
     tactic_ids = rankorder["tactic_id"].drop_duplicates().tolist()
 
 
     # read in the first row of tokenized table
     if user_seg_col == 1:
-        user_segs=[1]
+        user_segs = [1]
     else:
-        user_seg_col=user_seg_col.strip(' ')
-        user_segs=pd.read_sql("select distinct %s from %s where %s is not null;" %(user_seg_col,tokenized_table_name,
-                                                                                    user_seg_col),conn)[user_seg_col].unique().tolist()   # make sure unique user segments don't contain NA
+        user_seg_col = user_seg_col.strip(' ')
+        # make sure unique user segments don't contain NA
+        user_segs = pd.read_sql("select distinct %s from %s where %s is not null;" % (
+            user_seg_col, tokenized_table_name, user_seg_col), conn)[user_seg_col].unique().tolist()
+
 
     # output filename indicates tokenized table name and kpi column name
-    output_excel_path = "%s" % tokenized_table_name + '_' + kpi_col + '_' + strftime("%Y-%m-%d", gmtime() ) + '_' + str(int(time.time())) + '.xlsx'
+    output_excel_path = "%s" % tokenized_table_name + '_' + kpi_col + '_' + \
+                        strftime("%Y-%m-%d", gmtime()) + '_' + str(int(time.time())) + '.xlsx'
     appended_df = []
 
-    print(user_seg_col,user_segs,mta_partial_seg)
+
+    print(user_seg_col, user_segs, mta_partial_seg)
+
 
     for tactic_id in tactic_ids:
         for user_seg in user_segs:
 
-            ranked_dims = rankorder.loc[(rankorder["tactic_id"]==tactic_id)].sort_values('rankorder',ascending=True)["metric_id"].tolist()
+            ranked_dims = rankorder.loc[
+                rankorder["tactic_id"] == tactic_id].sort_values("rankorder", ascending=True)["metric_id"].tolist()
             ranked_dims_str = ', '.join(ranked_dims)
             ranked_dims_mkey = " || '_' || ".join(ranked_dims)
 
-            metric_key_sql_df = available_mkey(conn_string,
-                                                tactic_id,
-                                                tokenized_table_name,
-                                                ranked_dims_mkey,
-                                                ranked_dims_str,
-                                                kpi_col,
-                                                user_seg_col,
-                                                user_seg )
-            
+            tactic_name = rankorder.loc[rankorder.tactic_id == tactic_id, "tactic"].values[0]
+
+            try:
+                metric_key_sql_df, user_subset_table = available_mkey(
+                    conn_string,
+                    tactic_id,
+                    tactic_name,
+                    tokenized_table_name,
+                    ranked_dims_mkey,
+                    ranked_dims_str,
+                    kpi_col,
+                    user_seg_col,
+                    user_seg,
+                    mta_partial_seg)
+
+            except Exception as e:
+                logging.info(
+                    "> Activity: {} - Sampling users and creating user subsets reference table failed!".format(
+                        tactic_name
+                    ))
+                logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
+                continue
+
+
             if c.closed:
                 conn = psycopg2.connect(conn_string)
                 c = conn.cursor()
 
-            mkey_explanation = pd.read_sql(
-                "select distinct * from %s where metric_id='m0';" % (metric_key_explanation_table), conn)
+
 
             # if filtered segment has conversions
-            if metric_key_sql_df.shape[0] == 0 and use_user_info==1:
-                logging.info("> Activity: {} + User Segment: {} don't have conversions.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0], str(user_seg) ))
+            if metric_key_sql_df.shape[0] == 0 and use_user_info == 1:
+                logging.info("> Activity: {} + User Segment: {} don't have conversions.".format(
+                    tactic_name, str(user_seg)))
                 continue
-            elif metric_key_sql_df.shape[0] != 0 and use_user_info==1:
-                logging.info("> Jump into Activity: {} + User Segment: {}.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id), "dimension_name"].values[0],
-                                                                                    str(user_seg) ) )
-            elif metric_key_sql_df.shape[0] == 0 and use_user_info==2:
-                logging.info("> Activity: {} doesn't have conversions.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0] ))
+
+            elif metric_key_sql_df.shape[0] != 0 and use_user_info == 1:
+                logging.info("> Jump into Activity: {} + User Segment: {}.".format(tactic_name, str(user_seg)))
+
+            elif metric_key_sql_df.shape[0] == 0 and use_user_info == 2:
+                logging.info("> Activity: {} doesn't have conversions.".format(tactic_name))
                 continue
-            elif metric_key_sql_df.shape[0] != 0 and use_user_info==2:
-                logging.info("> Jump into Activity: {}.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id), "dimension_name"].values[0] ) )
+
+            elif metric_key_sql_df.shape[0] != 0 and use_user_info == 2:
+                logging.info("> Jump into Activity: {}.".format(tactic_name))
 
 
 
             try:
-                model_data, non_conversion_model_data,conversion_metric_averages, last_click, tokenized_cols, mta_partial_seg_flag = database_data_processing(
-                    metric_key_sql_df,
-                    ranked_dims_mkey,
-                    ranked_dims_str,
-                    kpi_col,
-                    tactic_id,
-                    user_seg_col,
-                    user_seg,
-                    mta_partial_seg,
-                    conn_string,
-                    tokenized_table_name,
-                    timediscount=1 )
-                
-                if mta_partial_seg_flag==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There are 0 rows in nonconversion data. If you only have user segment info for converted users, remember to check\
-                                the box and run MTA with each converted segment against all non-converted users at your own risk!!")
+                model_data, non_conversion_model_data, conversion_metric_averages, last_click, tokenized_cols, \
+                    mta_partial_seg_flag = database_data_processing(
+                        metric_key_sql_df,
+                        ranked_dims_mkey,
+                        ranked_dims_str,
+                        kpi_col,
+                        tactic_id,
+                        user_seg_col,
+                        user_seg,
+                        mta_partial_seg,
+                        conn_string,
+                        tokenized_table_name,
+                        sample_user_tablename=user_subset_table,
+                        timediscount=timediscount)
+
+                if mta_partial_seg_flag == 1:
+                    logging.info(
+                        "> Activity: {} + User Segment: {} --> There are 0 rows in nonconversion data. ".format(
+                            tactic_name, str(user_seg)
+                        ) + "If you only have user segment info for converted users, remember to check the box " +
+                        "and run TPA with each converted segment against all non-converted users at your own risk!!")
                     continue
 
             except Exception as e:
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> There is probably something wrong with data loading/cleaning process!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0] ) )
-                    # logging.info("> {}: {}".format(sys.exc_info()[0], str(e)))                            
-                    logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             # detailed traceback
+
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> ".format(tactic_name) +
+                                 "There is probably something wrong with data loading/cleaning process!")
+                    logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There is probably something wrong with data loading/cleaning process!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                                                    str(user_seg) ) )
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> ".format(tactic_name, str(user_seg)) +
+                                 "There is probably something wrong with data loading/cleaning process!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             
                     continue
                 
 
             try:
-                best_model_data, best_mkey_lookup_all, best_model,level, valid_num_iteration, best_mode_validation_metric = model_iteration(
-                    tokenized_table_name,
-                    tactic_id,
-                    ranked_dims,
-                    conversion_metric_averages,
-                    model_data,
-                    non_conversion_model_data,
-                    num_iterations=3, # no need to show on MTA UI
-                    quant=0.3 )
+                best_model_data, best_mkey_lookup_all, best_model, level, valid_num_iteration, \
+                    best_mode_validation_metric = model_iteration(
+                        tokenized_table_name,
+                        tactic_id,
+                        ranked_dims,
+                        conversion_metric_averages,
+                        model_data,
+                        non_conversion_model_data,
+                        num_iterations=3,
+                        quant=0.3)
+
             except Exception as e:
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> There is probably something wrong with model running process!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0] ) )
+
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> ".format(tactic_name) +
+                                 "There is probably something wrong with model running process!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             
                     continue
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There is probably something wrong with model running process!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                                            str(user_seg) ) )
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> ".format(tactic_name, str(user_seg)) +
+                                 "There is probably something wrong with model running process!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             
                     continue
 
@@ -1535,19 +1819,23 @@ def run_mta_multi(
                     spend=1,
                     margin=1)
                 
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> Decomp table is generated.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0] ) )
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> Decomp table is generated.".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0], str(user_seg) ) )
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> Decomp table is generated.".format(tactic_name))
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> Decomp table is generated.".format(
+                        tactic_name, str(user_seg)))
             
             except Exception as e:
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> There is probably something wrong with decomp calculation!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0]))
+
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> ".format(tactic_name) +
+                                 "There is probably something wrong with decomp calculation!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There is probably something wrong with decomp calculation!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                                            str(user_seg) ) )
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> ".format(tactic_name, str(user_seg)) +
+                                 "There is probably something wrong with decomp calculation!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
 
@@ -1565,19 +1853,24 @@ def run_mta_multi(
                     appended_df
                     # level
                 )
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> Mix Master has been generated!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0]))
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> Mix Master has been generated!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                str(user_seg) ) )
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> Mix Master has been generated!".format(tactic_name))
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> Mix Master has been generated!".format(
+                        tactic_name, str(user_seg)))
+
             except Exception as e:
-                if use_user_info==2:
-                    logging.info("> Activity: {} --> There is probably something wrong with mix master calculation!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0]))
+
+                if use_user_info == 2:
+                    logging.info("> Activity: {} --> ".format(tactic_name) +
+                                 "There is probably something wrong with mix master calculation!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
-                elif use_user_info==1:
-                    logging.info("> Activity: {} + User Segment: {} --> There is probably something wrong with mix master calculation!".format(mkey_explanation.loc[(mkey_explanation["dimension_id"]==tactic_id),"dimension_name"].values[0],
-                                                                                                                                                str(user_seg) ) )
+
+                elif use_user_info == 1:
+                    logging.info("> Activity: {} + User Segment: {} --> ".format(tactic_name, str(user_seg)) +
+                                 "There is probably something wrong with mix master calculation!")
                     logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
                     continue
     
@@ -1586,13 +1879,13 @@ def run_mta_multi(
     # concatenate mix master from different tactics
     try:
         appended_df_full = pd.concat(mix_master)
-        writer = pd.ExcelWriter(output_excel_path, engine='xlsxwriter' )
-        appended_df_full.to_excel(writer, sheet_name='Decomp Info', index=False )
+        writer = pd.ExcelWriter(output_excel_path, engine='xlsxwriter')
+        appended_df_full.to_excel(writer, sheet_name='Decomp Info', index=False)
         writer.save()
+
     except Exception as e:
         logging.info("> There is probably something wrong with concatenating decomp from tactic(s)!")
-        # logging.info("> {}: {}".format(sys.exc_info()[0], str(e)))
-        logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             # detailed traceback
+        logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
 
     try:
         upload_to_s3(
@@ -1601,9 +1894,10 @@ def run_mta_multi(
             destination=directory+output_excel_path,
             aws_access_key_id=aws_credentials['aws_access_key_id'],
             aws_secret_access_key=aws_credentials['aws_secret_access_key'])
-        logging.info("> Full Mix Master file {} is now in S3://analytic-partners/{}!".format(output_excel_path,directory) )
+        logging.info("> Full Mix Master file {} is now in S3://analytic-partners/{}!".format(
+            output_excel_path,directory))
+
     except Exception as e:
         logging.info("> There is probably something wrong with outputing mix master to S3!")
-        # logging.info("> {}: {}".format(sys.exc_info()[0], str(e)))
-        logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))             # detailed traceback
+        logging.error("{}: {}".format(sys.exc_info()[0], traceback.format_exc()))
 
