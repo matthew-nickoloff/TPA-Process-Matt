@@ -22,6 +22,7 @@ DBLIST = [
     {'label': 'mcdaus_internal', 'value': 'mcdaus_internal'},
     {'label': 'od_internal', 'value': 'od_internal'},
     {'label': 'hd_internal', 'value': 'hd_internal'},
+    {'label': 'scotts_internal', 'value': 'scotts_internal'},
     {'label': 'stjude_internal', 'value': 'stjude_internal'},
     {'label': 'tdat_internal', 'value': 'tdat_internal'},
     {'label': 'retail_demo_internal', 'value': 'retail_demo_internal'},
