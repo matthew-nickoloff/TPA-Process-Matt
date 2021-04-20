@@ -1320,7 +1320,7 @@ def decomp(
     # Op3:game theory
     start_time_gametheory = time.clock()
     mkey_cnt = len(best_mkey_lookup_all['metric_key'])
-    if mkey_cnt <= 5:
+    if 1 < mkey_cnt <= 5:
         def ncr(n, r):
             r = min(r, n - r)
             if r == 0:
@@ -1420,7 +1420,7 @@ def decomp(
 
 
 
-    if mkey_cnt <= 5:
+    if 1 < mkey_cnt <= 5:
         decomp_com = decomp1[cols].append(
         decomp2[cols],
         ignore_index=True).append(
